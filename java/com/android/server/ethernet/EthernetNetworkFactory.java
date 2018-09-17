@@ -52,7 +52,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
     private final static String TAG = EthernetNetworkFactory.class.getSimpleName();
     final static boolean DBG = true;
 
-    private final static int NETWORK_SCORE = 70;
+    private final static int NETWORK_SCORE = 110;
     private static final String NETWORK_TYPE = "Ethernet";
 
     private final ConcurrentHashMap<String, NetworkInterfaceState> mTrackingInterfaces =
