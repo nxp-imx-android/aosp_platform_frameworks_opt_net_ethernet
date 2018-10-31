@@ -269,6 +269,8 @@ public class EthernetNetworkFactory extends NetworkFactory {
         void setIpConfig(IpConfiguration ipConfig) {
 
             this.mIpConfig = ipConfig;
+            stop();
+            start();
         }
 
         boolean statisified(NetworkCapabilities requestedCapabilities) {
