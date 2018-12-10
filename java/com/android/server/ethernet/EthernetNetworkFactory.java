@@ -343,7 +343,12 @@ public class EthernetNetworkFactory extends NetworkFactory {
 
         /** Returns true if state has been modified */
         boolean updateLinkState(boolean up) {
-            if (mLinkUp == up) return false;
+            if (mLinkUp == up) {
+                if (!up) {
+                    stop();
+                }
+                return false;
+            }
             mLinkUp = up;
 
             stop();
