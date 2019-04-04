@@ -225,7 +225,9 @@ public class EthernetNetworkFactory extends NetworkFactory {
         } else {
             for (NetworkInterfaceState n : mTrackingInterfaces.values()) {
                 if (n.statisified(request.networkCapabilities)) {
-                    network = n;
+                    if (n.mLinkUp) {
+                        network = n;
+                    }
                     break;
                 }
             }
@@ -376,7 +378,14 @@ public class EthernetNetworkFactory extends NetworkFactory {
         }
 
         void setIpConfig(IpConfiguration ipConfig) {
+            if (this.mIpConfig != null && this.mIpConfig.equals(ipConfig)) {
+                if (DBG) Log.d(TAG, "ipConfig have not changed,so ignore setIpConfig");
+                return;
+            }
             this.mIpConfig = ipConfig;
+            if (mNetworkInfo.getDetailedState() != DetailedState.DISCONNECTED) {
+                restart();
+            }
         }
 
         boolean statisified(NetworkCapabilities requestedCapabilities) {
@@ -584,6 +593,14 @@ public class EthernetNetworkFactory extends NetworkFactory {
                 ipClient.startProvisioning(provisioningConfiguration.toStableParcelable());
             } catch (RemoteException e) {
                 e.rethrowFromSystemServer();
+            }
+        }
+
+        void restart(){
+            stop();
+            if (mLinkUp) {
+                if (DBG) Log.d(TAG, "reconnecting Etherent");
+                start();
             }
         }
 
