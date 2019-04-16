@@ -25,8 +25,9 @@ import android.net.IpConfiguration.ProxySettings;
 import android.net.LinkAddress;
 import android.net.NetworkCapabilities;
 import android.net.StaticIpConfiguration;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -159,11 +160,11 @@ public class EthernetTrackerTest {
 
         // Empty capabilities and transports lists with a "please clear defaults" should
         // yield an empty capabilities set with TRANPORT_ETHERNET
-        assertNetworkCapabilities(defaultEthernetCleared, true, "", "");
+        assertParsedNetworkCapabilities(defaultEthernetCleared, true, "", "");
 
         // Empty capabilities and transports without the clear defaults flag should return the
         // default capabilities set with TRANSPORT_ETHERNET
-        assertNetworkCapabilities(
+        assertParsedNetworkCapabilities(
                 new NetworkCapabilitiesBuilder()
                         .setLinkUpstreamBandwidthKbps(100000)
                         .setLinkDownstreamBandwidthKbps(100000)
@@ -173,7 +174,7 @@ public class EthernetTrackerTest {
 
         // A list of capabilities without the clear defaults flag should return the default
         // capabilities, mixed with the desired capabilities, and TRANSPORT_ETHERNET
-        assertNetworkCapabilities(
+        assertParsedNetworkCapabilities(
                 new NetworkCapabilitiesBuilder()
                         .setLinkUpstreamBandwidthKbps(100000)
                         .setLinkDownstreamBandwidthKbps(100000)
@@ -185,15 +186,15 @@ public class EthernetTrackerTest {
 
         // Adding a list of capabilities with a clear defaults will leave exactly those capabilities
         // with a default TRANSPORT_ETHERNET since no overrides are specified
-        assertNetworkCapabilities(ethernetClearedWithCommonCaps, true, "12,13,14,15", "");
+        assertParsedNetworkCapabilities(ethernetClearedWithCommonCaps, true, "12,13,14,15", "");
 
         // Adding any invalid capabilities to the list will cause them to be ignored
-        assertNetworkCapabilities(ethernetClearedWithCommonCaps, true, "12,13,14,15,65,73", "");
-        assertNetworkCapabilities(ethernetClearedWithCommonCaps, true, "12,13,14,15,abcdefg", "");
+        assertParsedNetworkCapabilities(ethernetClearedWithCommonCaps, true, "12,13,14,15,65,73", "");
+        assertParsedNetworkCapabilities(ethernetClearedWithCommonCaps, true, "12,13,14,15,abcdefg", "");
 
         // Adding a valid override transport will remove the default TRANSPORT_ETHERNET transport
         // and apply only the override to the capabiltities object
-        assertNetworkCapabilities(
+        assertParsedNetworkCapabilities(
                 new NetworkCapabilitiesBuilder()
                         .clearAll()
                         .setLinkUpstreamBandwidthKbps(100000)
@@ -201,7 +202,7 @@ public class EthernetTrackerTest {
                         .addTransport(0)
                         .build(),
                 true, "", "0");
-        assertNetworkCapabilities(
+        assertParsedNetworkCapabilities(
                 new NetworkCapabilitiesBuilder()
                         .clearAll()
                         .setLinkUpstreamBandwidthKbps(100000)
@@ -209,7 +210,7 @@ public class EthernetTrackerTest {
                         .addTransport(1)
                         .build(),
                 true, "", "1");
-        assertNetworkCapabilities(
+        assertParsedNetworkCapabilities(
                 new NetworkCapabilitiesBuilder()
                         .clearAll()
                         .setLinkUpstreamBandwidthKbps(100000)
@@ -217,7 +218,7 @@ public class EthernetTrackerTest {
                         .addTransport(2)
                         .build(),
                 true, "", "2");
-        assertNetworkCapabilities(
+        assertParsedNetworkCapabilities(
                 new NetworkCapabilitiesBuilder()
                         .clearAll()
                         .setLinkUpstreamBandwidthKbps(100000)
@@ -227,22 +228,22 @@ public class EthernetTrackerTest {
                 true, "", "3");
 
         // "4" is TRANSPORT_VPN, which is unsupported. Should default back to TRANPORT_ETHERNET
-        assertNetworkCapabilities(defaultEthernetCleared, true, "", "4");
+        assertParsedNetworkCapabilities(defaultEthernetCleared, true, "", "4");
 
         // "5" is TRANSPORT_WIFI_AWARE, which is currently supported due to no legacy TYPE_NONE
         // conversion. When that becomes available, this test must be updated
-        assertNetworkCapabilities(defaultEthernetCleared, true, "", "5");
+        assertParsedNetworkCapabilities(defaultEthernetCleared, true, "", "5");
 
         // "6" is TRANSPORT_LOWPAN, which is currently supported due to no legacy TYPE_NONE
         // conversion. When that becomes available, this test must be updated
-        assertNetworkCapabilities(defaultEthernetCleared, true, "", "6");
+        assertParsedNetworkCapabilities(defaultEthernetCleared, true, "", "6");
 
         // Adding an invalid override transport will leave the transport as TRANSPORT_ETHERNET
-        assertNetworkCapabilities(defaultEthernetCleared,true, "", "100");
-        assertNetworkCapabilities(defaultEthernetCleared, true, "", "abcdefg");
+        assertParsedNetworkCapabilities(defaultEthernetCleared,true, "", "100");
+        assertParsedNetworkCapabilities(defaultEthernetCleared, true, "", "abcdefg");
 
         // Ensure the adding of both capabilities and transports work
-        assertNetworkCapabilities(
+        assertParsedNetworkCapabilities(
                 new NetworkCapabilitiesBuilder()
                         .clearAll()
                         .setLinkUpstreamBandwidthKbps(100000)
@@ -256,10 +257,10 @@ public class EthernetTrackerTest {
                 true, "12,13,14,15", "3");
 
         // Ensure order does not matter for capability list
-        assertNetworkCapabilities(ethernetClearedWithCommonCaps, true, "13,12,15,14", "");
+        assertParsedNetworkCapabilities(ethernetClearedWithCommonCaps, true, "13,12,15,14", "");
     }
 
-    private void assertNetworkCapabilities(NetworkCapabilities expectedNetworkCapabilities,
+    private void assertParsedNetworkCapabilities(NetworkCapabilities expectedNetworkCapabilities,
             boolean clearCapabilties, String configCapabiltiies,String configTransports) {
         assertEquals(expectedNetworkCapabilities,
                 EthernetTracker.createNetworkCapabilities(clearCapabilties, configCapabiltiies,
