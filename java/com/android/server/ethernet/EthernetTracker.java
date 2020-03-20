@@ -16,9 +16,12 @@
 
 package com.android.server.ethernet;
 
+import static android.net.TestNetworkManager.TEST_TAP_PREFIX;
+
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.IEthernetServiceListener;
+import android.net.ITetheredInterfaceCallback;
 import android.net.InterfaceConfiguration;
 import android.net.IpConfiguration;
 import android.net.IpConfiguration.IpAssignment;
@@ -61,11 +64,18 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>All public or package private methods must be thread-safe unless stated otherwise.
  */
 final class EthernetTracker {
+    private static final int INTERFACE_MODE_CLIENT = 1;
+    private static final int INTERFACE_MODE_SERVER = 2;
+
     private final static String TAG = EthernetTracker.class.getSimpleName();
     private final static boolean DBG = EthernetNetworkFactory.DBG;
 
-    /** Product-dependent regular expression of interface names we track. */
-    private final String mIfaceMatch;
+    /**
+     * Interface names we track. This is a product-dependent regular expression, plus,
+     * if setIncludeTestInterfaces is true, any test interfaces.
+     */
+    private String mIfaceMatch;
+    private boolean mIncludeTestInterfaces = false;
 
     /** Mapping between {iface name | mac address} -> {NetworkCapabilities} */
     private final ConcurrentHashMap<String, NetworkCapabilities> mNetworkCapabilities =
@@ -73,6 +83,7 @@ final class EthernetTracker {
     private final ConcurrentHashMap<String, IpConfiguration> mIpConfigurations =
             new ConcurrentHashMap<>();
 
+    private final Context mContext;
     private final INetworkManagementService mNMService;
     private final Handler mHandler;
     private final EthernetNetworkFactory mFactory;
@@ -80,10 +91,25 @@ final class EthernetTracker {
 
     private final RemoteCallbackList<IEthernetServiceListener> mListeners =
             new RemoteCallbackList<>();
+    private final TetheredInterfaceRequestList mTetheredInterfaceRequests =
+            new TetheredInterfaceRequestList();
 
+    // Used only on the handler thread
+    private String mDefaultInterface;
+    private int mDefaultInterfaceMode = INTERFACE_MODE_CLIENT;
+    // Tracks whether clients were notified that the tethered interface is available
+    private boolean mTetheredInterfaceWasAvailable = false;
     private volatile IpConfiguration mIpConfigForDefaultInterface;
 
+    private class TetheredInterfaceRequestList extends RemoteCallbackList<ITetheredInterfaceCallback> {
+        @Override
+        public void onCallbackDied(ITetheredInterfaceCallback cb, Object cookie) {
+            mHandler.post(EthernetTracker.this::maybeUntetherDefaultInterface);
+        }
+    }
+
     EthernetTracker(Context context, Handler handler) {
+        mContext = context;
         mHandler = handler;
 
         // The services we use.
@@ -91,8 +117,7 @@ final class EthernetTracker {
         mNMService = INetworkManagementService.Stub.asInterface(b);
 
         // Interface match regex.
-        mIfaceMatch = context.getResources().getString(
-                com.android.internal.R.string.config_ethernet_iface_regex);
+        updateIfaceMatchRegexp();
 
         // Read default Ethernet interface configuration from resources
         final String[] interfaceConfigs = context.getResources().getStringArray(
@@ -167,8 +192,84 @@ final class EthernetTracker {
         mListeners.unregister(listener);
     }
 
+    public void setIncludeTestInterfaces(boolean include) {
+        mIncludeTestInterfaces = include;
+        updateIfaceMatchRegexp();
+        trackAvailableInterfaces();
+    }
+
+    public void requestTetheredInterface(ITetheredInterfaceCallback callback) {
+        mHandler.post(() -> {
+            if (!mTetheredInterfaceRequests.register(callback)) {
+                // Remote process has already died
+                return;
+            }
+            if (mDefaultInterfaceMode == INTERFACE_MODE_SERVER) {
+                if (mTetheredInterfaceWasAvailable) {
+                    notifyTetheredInterfaceAvailable(callback, mDefaultInterface);
+                }
+                return;
+            }
+
+            setDefaultInterfaceMode(INTERFACE_MODE_SERVER);
+        });
+    }
+
+    public void releaseTetheredInterface(ITetheredInterfaceCallback callback) {
+        mHandler.post(() -> {
+            mTetheredInterfaceRequests.unregister(callback);
+            maybeUntetherDefaultInterface();
+        });
+    }
+
+    private void notifyTetheredInterfaceAvailable(ITetheredInterfaceCallback cb, String iface) {
+        try {
+            cb.onAvailable(iface);
+        } catch (RemoteException e) {
+            Log.e(TAG, "Error sending tethered interface available callback", e);
+        }
+    }
+
+    private void notifyTetheredInterfaceUnavailable(ITetheredInterfaceCallback cb) {
+        try {
+            cb.onUnavailable();
+        } catch (RemoteException e) {
+            Log.e(TAG, "Error sending tethered interface available callback", e);
+        }
+    }
+
+    private void maybeUntetherDefaultInterface() {
+        if (mTetheredInterfaceRequests.getRegisteredCallbackCount() > 0) return;
+        if (mDefaultInterfaceMode == INTERFACE_MODE_CLIENT) return;
+        setDefaultInterfaceMode(INTERFACE_MODE_CLIENT);
+    }
+
+    private void setDefaultInterfaceMode(int mode) {
+        Log.d(TAG, "Setting default interface mode to " + mode);
+        mDefaultInterfaceMode = mode;
+        if (mDefaultInterface != null) {
+            removeInterface(mDefaultInterface);
+            addInterface(mDefaultInterface);
+        }
+    }
+
+    private int getInterfaceMode(final String iface) {
+        if (iface.equals(mDefaultInterface)) {
+            return mDefaultInterfaceMode;
+        }
+        return INTERFACE_MODE_CLIENT;
+    }
+
     private void removeInterface(String iface) {
         mFactory.removeInterface(iface);
+        maybeUpdateServerModeInterfaceState(iface, false);
+    }
+
+    private void stopTrackingInterface(String iface) {
+        removeInterface(iface);
+        if (iface.equals(mDefaultInterface)) {
+            mDefaultInterface = null;
+        }
     }
 
     private void addInterface(String iface) {
@@ -198,13 +299,19 @@ final class EthernetTracker {
                 nc = createDefaultNetworkCapabilities();
             }
         }
-        IpConfiguration ipConfiguration = mIpConfigurations.get(iface);
-        if (ipConfiguration == null) {
-            ipConfiguration = createDefaultIpConfiguration();
-        }
 
-        Log.d(TAG, "Started tracking interface " + iface);
-        mFactory.addInterface(iface, hwAddress, nc, ipConfiguration);
+        final int mode = getInterfaceMode(iface);
+        if (mode == INTERFACE_MODE_CLIENT) {
+            IpConfiguration ipConfiguration = mIpConfigurations.get(iface);
+            if (ipConfiguration == null) {
+                ipConfiguration = createDefaultIpConfiguration();
+            }
+
+            Log.d(TAG, "Started tracking interface " + iface);
+            mFactory.addInterface(iface, hwAddress, nc, ipConfiguration);
+        } else {
+            maybeUpdateServerModeInterfaceState(iface, true);
+        }
 
         // Note: if the interface already has link (e.g., if we crashed and got
         // restarted while it was running), we need to fake a link up notification so we
@@ -215,8 +322,11 @@ final class EthernetTracker {
     }
 
     private void updateInterfaceState(String iface, boolean up) {
-        boolean modified = mFactory.updateInterfaceLinkState(iface, up);
-        if (modified) {
+        final int mode = getInterfaceMode(iface);
+        final boolean factoryLinkStateUpdated = (mode == INTERFACE_MODE_CLIENT)
+                && mFactory.updateInterfaceLinkState(iface, up);
+
+        if (factoryLinkStateUpdated) {
             boolean restricted = isRestrictedInterface(iface);
             int n = mListeners.beginBroadcast();
             for (int i = 0; i < n; i++) {
@@ -236,12 +346,34 @@ final class EthernetTracker {
         }
     }
 
+    private void maybeUpdateServerModeInterfaceState(String iface, boolean available) {
+        if (available == mTetheredInterfaceWasAvailable || !iface.equals(mDefaultInterface)) return;
+
+        final int pendingCbs = mTetheredInterfaceRequests.beginBroadcast();
+        for (int i = 0; i < pendingCbs; i++) {
+            ITetheredInterfaceCallback item = mTetheredInterfaceRequests.getBroadcastItem(i);
+            if (available) {
+                notifyTetheredInterfaceAvailable(item, iface);
+            } else {
+                notifyTetheredInterfaceUnavailable(item);
+            }
+        }
+        mTetheredInterfaceRequests.finishBroadcast();
+        mTetheredInterfaceWasAvailable = available;
+    }
+
     private void maybeTrackInterface(String iface) {
         if (DBG) Log.i(TAG, "maybeTrackInterface " + iface);
         // If we don't already track this interface, and if this interface matches
         // our regex, start tracking it.
-        if (!iface.matches(mIfaceMatch) || mFactory.hasInterface(iface)) {
+        if (!iface.matches(mIfaceMatch) || mFactory.hasInterface(iface)
+                || iface.equals(mDefaultInterface)) {
             return;
+        }
+
+        // TODO: avoid making an interface default if it has configured NetworkCapabilities.
+        if (mDefaultInterface == null) {
+            mDefaultInterface = iface;
         }
 
         if (mIpConfigForDefaultInterface != null) {
@@ -281,7 +413,7 @@ final class EthernetTracker {
 
         @Override
         public void interfaceRemoved(String iface) {
-            mHandler.post(() -> removeInterface(iface));
+            mHandler.post(() -> stopTrackingInterface(iface));
         }
     }
 
@@ -459,6 +591,15 @@ final class EthernetTracker {
         return new IpConfiguration(IpAssignment.DHCP, ProxySettings.NONE, null, null);
     }
 
+    private void updateIfaceMatchRegexp() {
+        final String match = mContext.getResources().getString(
+                com.android.internal.R.string.config_ethernet_iface_regex);
+        mIfaceMatch = mIncludeTestInterfaces
+                ? "(" + match + "|" + TEST_TAP_PREFIX + "\\d+)"
+                : match;
+        Log.d(TAG, "Interface match regexp set to '" + mIfaceMatch + "'");
+    }
+
     private void postAndWaitForRunnable(Runnable r) {
         mHandler.runWithScissors(r, 2000L /* timeout */);
     }
@@ -467,6 +608,10 @@ final class EthernetTracker {
         postAndWaitForRunnable(() -> {
             pw.println(getClass().getSimpleName());
             pw.println("Ethernet interface name filter: " + mIfaceMatch);
+            pw.println("Default interface: " + mDefaultInterface);
+            pw.println("Default interface mode: " + mDefaultInterfaceMode);
+            pw.println("Tethered interface requests: "
+                    + mTetheredInterfaceRequests.getRegisteredCallbackCount());
             pw.println("Listeners: " + mListeners.getRegisteredCallbackCount());
             pw.println("IP Configurations:");
             pw.increaseIndent();
