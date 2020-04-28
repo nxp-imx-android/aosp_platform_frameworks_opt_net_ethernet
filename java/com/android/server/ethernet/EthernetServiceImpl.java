@@ -21,7 +21,6 @@ import android.content.pm.PackageManager;
 import android.net.IEthernetManager;
 import android.net.IEthernetServiceListener;
 import android.net.IpConfiguration;
-import android.net.NetworkStack;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -56,6 +55,12 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         mContext.enforceCallingOrSelfPermission(
                 android.Manifest.permission.ACCESS_NETWORK_STATE,
                 "EthernetService");
+    }
+
+    private void enforceConnectivityInternalPermission() {
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.CONNECTIVITY_INTERNAL,
+                "ConnectivityService");
     }
 
     private void enforceUseRestrictedNetworksPermission() {
@@ -112,7 +117,7 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
             Log.w(TAG, "System isn't ready enough to change ethernet configuration");
         }
 
-        NetworkStack.checkNetworkStackPermission(mContext);
+        enforceConnectivityInternalPermission();
 
         if (mTracker.isRestrictedInterface(iface)) {
             enforceUseRestrictedNetworksPermission();

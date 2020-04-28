@@ -21,7 +21,6 @@ import static android.net.shared.LinkPropertiesParcelableUtil.toStableParcelable
 import static com.android.internal.util.Preconditions.checkNotNull;
 
 import android.annotation.NonNull;
-import android.annotation.Nullable;
 import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.IpConfiguration;
@@ -54,7 +53,6 @@ import com.android.internal.util.IndentingPrintWriter;
 import java.io.FileDescriptor;
 import java.lang.Math;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.Objects;
 
 /**
  * {@link NetworkFactory} that represents Ethernet networks.
@@ -157,7 +155,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
         }
 
         NetworkInterfaceState iface = new NetworkInterfaceState(
-                ifaceName, hwAddress, mHandler, mContext, capabilities, this);
+                ifaceName, hwAddress, mHandler, mContext, capabilities);
         iface.setIpConfig(ipConfiguration);
         mTrackingInterfaces.put(ifaceName, iface);
 
@@ -248,17 +246,16 @@ public class EthernetNetworkFactory extends NetworkFactory {
         private final Handler mHandler;
         private final Context mContext;
         private final NetworkInfo mNetworkInfo;
-        private final NetworkFactory mNetworkFactory;
 
         private static String sTcpBufferSizes = null;  // Lazy initialized.
 
         private boolean mLinkUp;
         private LinkProperties mLinkProperties = new LinkProperties();
 
-        private volatile @Nullable IIpClient mIpClient;
-        private @Nullable IpClientCallbacksImpl mIpClientCallback;
-        private @Nullable NetworkAgent mNetworkAgent;
-        private @Nullable IpConfiguration mIpConfig;
+        private volatile IIpClient mIpClient;
+        private IpClientCallbacksImpl mIpClientCallback;
+        private NetworkAgent mNetworkAgent;
+        private IpConfiguration mIpConfig;
 
         /**
          * An object to contain all transport type information, including base network score and
@@ -357,15 +354,13 @@ public class EthernetNetworkFactory extends NetworkFactory {
         }
 
         NetworkInterfaceState(String ifaceName, String hwAddress, Handler handler, Context context,
-                @NonNull NetworkCapabilities capabilities, NetworkFactory networkFactory) {
+                @NonNull NetworkCapabilities capabilities) {
             name = ifaceName;
             mCapabilities = checkNotNull(capabilities);
             mHandler = handler;
             mContext = context;
-            mNetworkFactory = networkFactory;
             int legacyType = ConnectivityManager.TYPE_NONE;
             int[] transportTypes = mCapabilities.getTransportTypes();
-
             if (transportTypes.length > 0) {
                 legacyType = getLegacyType(transportTypes[0]);
             } else {
@@ -381,14 +376,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
         }
 
         void setIpConfig(IpConfiguration ipConfig) {
-            if (Objects.equals(this.mIpConfig, ipConfig)) {
-                if (DBG) Log.d(TAG, "ipConfig have not changed,so ignore setIpConfig");
-                return;
-            }
             this.mIpConfig = ipConfig;
-            if (mNetworkInfo.getDetailedState() != DetailedState.DISCONNECTED) {
-                restart();
-            }
         }
 
         boolean statisified(NetworkCapabilities requestedCapabilities) {
@@ -474,7 +462,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
             // Create our NetworkAgent.
             mNetworkAgent = new NetworkAgent(mHandler.getLooper(), mContext,
                     NETWORK_TYPE, mNetworkInfo, mCapabilities, mLinkProperties,
-                    getNetworkScore(), mNetworkFactory.getSerialNumber()) {
+                    getNetworkScore()) {
                 public void unwanted() {
                     if (this == mNetworkAgent) {
                         stop();
@@ -597,12 +585,6 @@ public class EthernetNetworkFactory extends NetworkFactory {
             } catch (RemoteException e) {
                 e.rethrowFromSystemServer();
             }
-        }
-
-        void restart(){
-            if (DBG) Log.d(TAG, "reconnecting Etherent");
-            stop();
-            start();
         }
 
         @Override
