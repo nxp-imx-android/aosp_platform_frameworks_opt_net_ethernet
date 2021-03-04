@@ -21,6 +21,7 @@ import static android.net.TestNetworkManager.TEST_TAP_PREFIX;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.IEthernetServiceListener;
+import android.net.INetd;
 import android.net.ITetheredInterfaceCallback;
 import android.net.InterfaceConfiguration;
 import android.net.IpConfiguration;
@@ -28,6 +29,7 @@ import android.net.IpConfiguration.IpAssignment;
 import android.net.IpConfiguration.ProxySettings;
 import android.net.LinkAddress;
 import android.net.NetworkCapabilities;
+import android.net.NetworkStack;
 import android.net.StaticIpConfiguration;
 import android.os.Handler;
 import android.os.IBinder;
@@ -38,14 +40,17 @@ import android.os.ServiceManager;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
+import android.net.util.NetdService;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
+import com.android.net.module.util.NetdUtils;
 import com.android.server.net.BaseNetworkObserver;
 
 import java.io.FileDescriptor;
 import java.net.InetAddress;
 import java.util.ArrayList;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -87,6 +92,7 @@ final class EthernetTracker {
 
     private final Context mContext;
     private final INetworkManagementService mNMService;
+    private final INetd mNetd;
     private final Handler mHandler;
     private final EthernetNetworkFactory mFactory;
     private final EthernetConfigStore mConfigStore;
@@ -117,6 +123,7 @@ final class EthernetTracker {
         // The services we use.
         IBinder b = ServiceManager.getService(Context.NETWORKMANAGEMENT_SERVICE);
         mNMService = INetworkManagementService.Stub.asInterface(b);
+        mNetd = Objects.requireNonNull(NetdService.getInstance(), "could not get netd instance");
 
         // Interface match regex.
         updateIfaceMatchRegexp();
@@ -280,7 +287,8 @@ final class EthernetTracker {
         InterfaceConfiguration config = null;
         // Bring up the interface so we get link status indications.
         try {
-            mNMService.setInterfaceUp(iface);
+            NetworkStack.checkNetworkStackPermission(mContext);
+            NetdUtils.setInterfaceUp(mNetd, iface);
             config = mNMService.getInterfaceConfig(iface);
         } catch (RemoteException | IllegalStateException e) {
             // Either the system is crashing or the interface has disappeared. Just ignore the
@@ -467,6 +475,7 @@ final class EthernetTracker {
         nc.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING);
         nc.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED);
         nc.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED);
+        nc.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VCN_MANAGED);
 
         if (isTestIface) {
             nc.addTransportType(NetworkCapabilities.TRANSPORT_TEST);
@@ -497,9 +506,9 @@ final class EthernetTracker {
             boolean clearDefaultCapabilities, @Nullable String commaSeparatedCapabilities,
             @Nullable String overrideTransport) {
 
-        NetworkCapabilities nc = new NetworkCapabilities();
+        final NetworkCapabilities.Builder builder = new NetworkCapabilities.Builder();
         if (clearDefaultCapabilities) {
-            nc.clearAll();  // Remove default capabilities and transports
+            builder.clearAll();  // Remove default capabilities and transports
         }
 
         // Determine the transport type. If someone has tried to define an override transport then
@@ -527,21 +536,21 @@ final class EthernetTracker {
         // Apply the transport. If the user supplied a valid number that is not a valid transport
         // then adding will throw an exception. Default back to TRANSPORT_ETHERNET if that happens
         try {
-            nc.addTransportType(transport);
+            builder.addTransportType(transport);
         } catch (IllegalArgumentException iae) {
             Log.e(TAG, transport + " is not a valid NetworkCapability.TRANSPORT_* value. "
                     + "Defaulting to TRANSPORT_ETHERNET");
-            nc.addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET);
+            builder.addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET);
         }
 
-        nc.setLinkUpstreamBandwidthKbps(100 * 1000);
-        nc.setLinkDownstreamBandwidthKbps(100 * 1000);
+        builder.setLinkUpstreamBandwidthKbps(100 * 1000);
+        builder.setLinkDownstreamBandwidthKbps(100 * 1000);
 
         if (!TextUtils.isEmpty(commaSeparatedCapabilities)) {
             for (String strNetworkCapability : commaSeparatedCapabilities.split(",")) {
                 if (!TextUtils.isEmpty(strNetworkCapability)) {
                     try {
-                        nc.addCapability(Integer.valueOf(strNetworkCapability));
+                        builder.addCapability(Integer.valueOf(strNetworkCapability));
                     } catch (NumberFormatException nfe) {
                         Log.e(TAG, "Capability '" + strNetworkCapability + "' could not be parsed");
                     } catch (IllegalArgumentException iae) {
@@ -553,11 +562,11 @@ final class EthernetTracker {
         }
         // Ethernet networks have no way to update the following capabilities, so they always
         // have them.
-        nc.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING);
-        nc.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED);
-        nc.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED);
+        builder.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING);
+        builder.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED);
+        builder.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED);
 
-        return nc;
+        return builder.build();
     }
 
     /**
