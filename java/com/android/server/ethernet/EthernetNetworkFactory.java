@@ -23,6 +23,7 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.ConnectivityManager;
+import android.net.EthernetNetworkSpecifier;
 import android.net.IpConfiguration;
 import android.net.IpConfiguration.IpAssignment;
 import android.net.IpConfiguration.ProxySettings;
@@ -33,7 +34,6 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkFactory;
 import android.net.NetworkRequest;
 import android.net.NetworkSpecifier;
-import android.net.StringNetworkSpecifier;
 import android.net.ip.IIpClient;
 import android.net.ip.IpClientCallbacks;
 import android.net.ip.IpClientUtil;
@@ -88,10 +88,6 @@ public class EthernetNetworkFactory extends NetworkFactory {
 
     @Override
     public boolean acceptRequest(NetworkRequest request) {
-        if (request.type == NetworkRequest.Type.TRACK_DEFAULT) {
-            return false;
-        }
-
         if (DBG) {
             Log.d(TAG, "acceptRequest, request: " + request);
         }
@@ -219,8 +215,9 @@ public class EthernetNetworkFactory extends NetworkFactory {
         String requestedIface = null;
 
         NetworkSpecifier specifier = request.getNetworkSpecifier();
-        if (specifier instanceof StringNetworkSpecifier) {
-            requestedIface = ((StringNetworkSpecifier) specifier).specifier;
+        if (specifier instanceof EthernetNetworkSpecifier) {
+            requestedIface = ((EthernetNetworkSpecifier) specifier)
+                .getInterfaceName();
         }
 
         NetworkInterfaceState network = null;
