@@ -17,6 +17,7 @@
 package com.android.server.ethernet;
 
 import static android.net.shared.LinkPropertiesParcelableUtil.toStableParcelable;
+
 import static com.android.internal.util.Preconditions.checkNotNull;
 
 import android.annotation.NonNull;
@@ -50,8 +51,8 @@ import android.util.SparseArray;
 import com.android.internal.util.IndentingPrintWriter;
 
 import java.io.FileDescriptor;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * {@link NetworkFactory} that represents Ethernet networks.
@@ -166,8 +167,9 @@ public class EthernetNetworkFactory extends NetworkFactory {
     }
 
     private void updateCapabilityFilter() {
-        NetworkCapabilities capabilitiesFilter = new NetworkCapabilities();
-        capabilitiesFilter.clearAll();
+        NetworkCapabilities capabilitiesFilter = new NetworkCapabilities.Builder()
+                .clearAll()
+                .build();
 
         for (NetworkInterfaceState iface:  mTrackingInterfaces.values()) {
             capabilitiesFilter = mixInCapabilities(capabilitiesFilter, iface.mCapabilities);
@@ -223,12 +225,12 @@ public class EthernetNetworkFactory extends NetworkFactory {
         NetworkInterfaceState network = null;
         if (!TextUtils.isEmpty(requestedIface)) {
             NetworkInterfaceState n = mTrackingInterfaces.get(requestedIface);
-            if (n != null && n.satisfied(request.networkCapabilities)) {
+            if (n != null && request.canBeSatisfiedBy(n.mCapabilities)) {
                 network = n;
             }
         } else {
             for (NetworkInterfaceState n : mTrackingInterfaces.values()) {
-                if (n.satisfied(request.networkCapabilities) && n.mLinkUp) {
+                if (request.canBeSatisfiedBy(n.mCapabilities) && n.mLinkUp) {
                     network = n;
                     break;
                 }
@@ -471,6 +473,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
             final NetworkAgentConfig config = new NetworkAgentConfig.Builder()
                     .setLegacyType(mLegacyType)
                     .setLegacyTypeName(NETWORK_TYPE)
+                    .setLegacyExtraInfo(mHwAddress)
                     .build();
             mNetworkAgent = new NetworkAgent(mContext, mHandler.getLooper(),
                     NETWORK_TYPE, mCapabilities, mLinkProperties,
@@ -485,7 +488,6 @@ public class EthernetNetworkFactory extends NetworkFactory {
                 }
             };
             mNetworkAgent.register();
-            mNetworkAgent.setLegacyExtraInfo(mHwAddress);
             mNetworkAgent.markConnected();
         }
 
