@@ -17,12 +17,14 @@
 package com.android.server.ethernet;
 
 import static android.net.shared.LinkPropertiesParcelableUtil.toStableParcelable;
+
 import static com.android.internal.util.Preconditions.checkNotNull;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.ConnectivityManager;
+import android.net.EthernetNetworkSpecifier;
 import android.net.IpConfiguration;
 import android.net.IpConfiguration.IpAssignment;
 import android.net.IpConfiguration.ProxySettings;
@@ -33,7 +35,6 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkFactory;
 import android.net.NetworkRequest;
 import android.net.NetworkSpecifier;
-import android.net.StringNetworkSpecifier;
 import android.net.ip.IIpClient;
 import android.net.ip.IpClientCallbacks;
 import android.net.ip.IpClientUtil;
@@ -50,8 +51,8 @@ import android.util.SparseArray;
 import com.android.internal.util.IndentingPrintWriter;
 
 import java.io.FileDescriptor;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * {@link NetworkFactory} that represents Ethernet networks.
@@ -88,10 +89,6 @@ public class EthernetNetworkFactory extends NetworkFactory {
 
     @Override
     public boolean acceptRequest(NetworkRequest request) {
-        if (request.type == NetworkRequest.Type.TRACK_DEFAULT) {
-            return false;
-        }
-
         if (DBG) {
             Log.d(TAG, "acceptRequest, request: " + request);
         }
@@ -170,8 +167,9 @@ public class EthernetNetworkFactory extends NetworkFactory {
     }
 
     private void updateCapabilityFilter() {
-        NetworkCapabilities capabilitiesFilter = new NetworkCapabilities();
-        capabilitiesFilter.clearAll();
+        NetworkCapabilities capabilitiesFilter = new NetworkCapabilities.Builder()
+                .clearAll()
+                .build();
 
         for (NetworkInterfaceState iface:  mTrackingInterfaces.values()) {
             capabilitiesFilter = mixInCapabilities(capabilitiesFilter, iface.mCapabilities);
@@ -219,19 +217,20 @@ public class EthernetNetworkFactory extends NetworkFactory {
         String requestedIface = null;
 
         NetworkSpecifier specifier = request.getNetworkSpecifier();
-        if (specifier instanceof StringNetworkSpecifier) {
-            requestedIface = ((StringNetworkSpecifier) specifier).specifier;
+        if (specifier instanceof EthernetNetworkSpecifier) {
+            requestedIface = ((EthernetNetworkSpecifier) specifier)
+                .getInterfaceName();
         }
 
         NetworkInterfaceState network = null;
         if (!TextUtils.isEmpty(requestedIface)) {
             NetworkInterfaceState n = mTrackingInterfaces.get(requestedIface);
-            if (n != null && n.satisfied(request.networkCapabilities)) {
+            if (n != null && request.canBeSatisfiedBy(n.mCapabilities)) {
                 network = n;
             }
         } else {
             for (NetworkInterfaceState n : mTrackingInterfaces.values()) {
-                if (n.satisfied(request.networkCapabilities) && n.mLinkUp) {
+                if (request.canBeSatisfiedBy(n.mCapabilities) && n.mLinkUp) {
                     network = n;
                     break;
                 }
@@ -474,6 +473,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
             final NetworkAgentConfig config = new NetworkAgentConfig.Builder()
                     .setLegacyType(mLegacyType)
                     .setLegacyTypeName(NETWORK_TYPE)
+                    .setLegacyExtraInfo(mHwAddress)
                     .build();
             mNetworkAgent = new NetworkAgent(mContext, mHandler.getLooper(),
                     NETWORK_TYPE, mCapabilities, mLinkProperties,
@@ -488,7 +488,6 @@ public class EthernetNetworkFactory extends NetworkFactory {
                 }
             };
             mNetworkAgent.register();
-            mNetworkAgent.setLegacyExtraInfo(mHwAddress);
             mNetworkAgent.markConnected();
         }
 
