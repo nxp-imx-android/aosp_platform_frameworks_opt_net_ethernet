@@ -16,8 +16,6 @@
 
 package com.android.server.ethernet;
 
-import static android.net.shared.LinkPropertiesParcelableUtil.toStableParcelable;
-
 import static com.android.internal.util.Preconditions.checkNotNull;
 
 import android.annotation.NonNull;
@@ -167,8 +165,9 @@ public class EthernetNetworkFactory extends NetworkFactory {
     }
 
     private void updateCapabilityFilter() {
-        NetworkCapabilities capabilitiesFilter = new NetworkCapabilities.Builder()
-                .clearAll()
+        NetworkCapabilities capabilitiesFilter =
+                NetworkCapabilities.Builder.withoutDefaultCapabilities()
+                .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
                 .build();
 
         for (NetworkInterfaceState iface:  mTrackingInterfaces.values()) {
@@ -559,7 +558,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
             if (config.getProxySettings() == ProxySettings.STATIC ||
                     config.getProxySettings() == ProxySettings.PAC) {
                 try {
-                    ipClient.setHttpProxy(toStableParcelable(config.getHttpProxy()));
+                    ipClient.setHttpProxy(config.getHttpProxy());
                 } catch (RemoteException e) {
                     e.rethrowFromSystemServer();
                 }
