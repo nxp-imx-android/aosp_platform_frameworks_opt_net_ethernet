@@ -16,8 +16,6 @@
 
 package com.android.server.ethernet;
 
-import static android.net.shared.LinkPropertiesParcelableUtil.toStableParcelable;
-
 import static com.android.internal.util.Preconditions.checkNotNull;
 
 import android.annotation.NonNull;
@@ -29,10 +27,10 @@ import android.net.IpConfiguration;
 import android.net.IpConfiguration.IpAssignment;
 import android.net.IpConfiguration.ProxySettings;
 import android.net.LinkProperties;
-import android.net.NetworkAgent;
 import android.net.NetworkAgentConfig;
 import android.net.NetworkCapabilities;
 import android.net.NetworkFactory;
+import android.net.NetworkProvider;
 import android.net.NetworkRequest;
 import android.net.NetworkSpecifier;
 import android.net.ip.IIpClient;
@@ -42,12 +40,14 @@ import android.net.shared.ProvisioningConfiguration;
 import android.net.util.InterfaceParams;
 import android.os.ConditionVariable;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.RemoteException;
 import android.text.TextUtils;
 import android.util.AndroidRuntimeException;
 import android.util.Log;
 import android.util.SparseArray;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
 
 import java.io.FileDescriptor;
@@ -71,6 +71,25 @@ public class EthernetNetworkFactory extends NetworkFactory {
             new ConcurrentHashMap<>();
     private final Handler mHandler;
     private final Context mContext;
+    final Dependencies mDeps;
+
+    public static class Dependencies {
+        public void makeIpClient(Context context, String iface, IpClientCallbacks callbacks) {
+            IpClientUtil.makeIpClient(context, iface, callbacks);
+        }
+
+        public EthernetNetworkAgent makeEthernetNetworkAgent(Context context, Looper looper,
+                NetworkCapabilities nc, LinkProperties lp, int networkScore,
+                NetworkAgentConfig config, NetworkProvider provider,
+                EthernetNetworkAgent.Callbacks cb) {
+            return new EthernetNetworkAgent(context, looper, nc, lp, networkScore, config, provider,
+                    cb);
+        }
+
+        public InterfaceParams getNetworkInterfaceByName(String name) {
+            return InterfaceParams.getByName(name);
+        }
+    }
 
     public static class ConfigurationException extends AndroidRuntimeException {
         public ConfigurationException(String msg) {
@@ -79,10 +98,17 @@ public class EthernetNetworkFactory extends NetworkFactory {
     }
 
     public EthernetNetworkFactory(Handler handler, Context context, NetworkCapabilities filter) {
+        this(handler, context, filter, new Dependencies());
+    }
+
+    @VisibleForTesting
+    EthernetNetworkFactory(Handler handler, Context context, NetworkCapabilities filter,
+            Dependencies deps) {
         super(handler.getLooper(), context, NETWORK_TYPE, filter);
 
         mHandler = handler;
         mContext = context;
+        mDeps = deps;
 
         setScoreFilter(NETWORK_SCORE);
     }
@@ -151,7 +177,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
         }
 
         NetworkInterfaceState iface = new NetworkInterfaceState(
-                ifaceName, hwAddress, mHandler, mContext, capabilities, this);
+                ifaceName, hwAddress, mHandler, mContext, capabilities, this, mDeps);
         iface.setIpConfig(ipConfiguration);
         mTrackingInterfaces.put(ifaceName, iface);
 
@@ -167,8 +193,8 @@ public class EthernetNetworkFactory extends NetworkFactory {
     }
 
     private void updateCapabilityFilter() {
-        NetworkCapabilities capabilitiesFilter = new NetworkCapabilities.Builder()
-                .clearAll()
+        NetworkCapabilities capabilitiesFilter =
+                NetworkCapabilities.Builder.withoutDefaultCapabilities()
                 .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
                 .build();
 
@@ -253,6 +279,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
         private final Handler mHandler;
         private final Context mContext;
         private final NetworkFactory mNetworkFactory;
+        private final Dependencies mDeps;
         private final int mLegacyType;
 
         private static String sTcpBufferSizes = null;  // Lazy initialized.
@@ -262,7 +289,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
 
         private volatile @Nullable IIpClient mIpClient;
         private @Nullable IpClientCallbacksImpl mIpClientCallback;
-        private @Nullable NetworkAgent mNetworkAgent;
+        private @Nullable EthernetNetworkAgent mNetworkAgent;
         private @Nullable IpConfiguration mIpConfig;
 
         /**
@@ -362,12 +389,14 @@ public class EthernetNetworkFactory extends NetworkFactory {
         }
 
         NetworkInterfaceState(String ifaceName, String hwAddress, Handler handler, Context context,
-                @NonNull NetworkCapabilities capabilities, NetworkFactory networkFactory) {
+                @NonNull NetworkCapabilities capabilities, NetworkFactory networkFactory,
+                Dependencies deps) {
             name = ifaceName;
             mCapabilities = checkNotNull(capabilities);
             mHandler = handler;
             mContext = context;
             mNetworkFactory = networkFactory;
+            mDeps = deps;
             int legacyType = ConnectivityManager.TYPE_NONE;
             int[] transportTypes = mCapabilities.getTransportTypes();
 
@@ -392,10 +421,6 @@ public class EthernetNetworkFactory extends NetworkFactory {
             if (mNetworkAgent != null) {
                 restart();
             }
-        }
-
-        boolean satisfied(NetworkCapabilities requestedCapabilities) {
-            return requestedCapabilities.satisfiedByNetworkCapabilities(mCapabilities);
         }
 
         boolean isRestricted() {
@@ -453,7 +478,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
             }
 
             mIpClientCallback = new IpClientCallbacksImpl();
-            IpClientUtil.makeIpClient(mContext, name, mIpClientCallback);
+            mDeps.makeIpClient(mContext, name, mIpClientCallback);
             mIpClientCallback.awaitIpClientStart();
             if (sTcpBufferSizes == null) {
                 sTcpBufferSizes = mContext.getResources().getString(
@@ -476,18 +501,22 @@ public class EthernetNetworkFactory extends NetworkFactory {
                     .setLegacyTypeName(NETWORK_TYPE)
                     .setLegacyExtraInfo(mHwAddress)
                     .build();
-            mNetworkAgent = new NetworkAgent(mContext, mHandler.getLooper(),
-                    NETWORK_TYPE, mCapabilities, mLinkProperties,
-                    getNetworkScore(), config, mNetworkFactory.getProvider()) {
-                public void unwanted() {
-                    if (this == mNetworkAgent) {
-                        stop();
-                    } else if (mNetworkAgent != null) {
-                        Log.d(TAG, "Ignoring unwanted as we have a more modern " +
-                                "instance");
-                    }  // Otherwise, we've already called stop.
-                }
-            };
+            mNetworkAgent = mDeps.makeEthernetNetworkAgent(mContext, mHandler.getLooper(),
+                    mCapabilities, mLinkProperties, getNetworkScore(), config,
+                    mNetworkFactory.getProvider(), new EthernetNetworkAgent.Callbacks() {
+                        @Override
+                        public void onNetworkUnwanted() {
+                            // if mNetworkAgent is null, we have already called stop.
+                            if (mNetworkAgent == null) return;
+
+                            if (this == mNetworkAgent.getCallbacks()) {
+                                stop();
+                            } else {
+                                Log.d(TAG, "Ignoring unwanted as we have a more modern " +
+                                        "instance");
+                            }
+                        }
+                    });
             mNetworkAgent.register();
             mNetworkAgent.markConnected();
         }
@@ -498,7 +527,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
             stop();
             // If the interface has disappeared provisioning will fail over and over again, so
             // there is no point in starting again
-            if (null != InterfaceParams.getByName(name)) {
+            if (null != mDeps.getNetworkInterfaceByName(name)) {
                 start();
             }
         }
@@ -506,7 +535,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
         void updateLinkProperties(LinkProperties linkProperties) {
             mLinkProperties = linkProperties;
             if (mNetworkAgent != null) {
-                mNetworkAgent.sendLinkProperties(linkProperties);
+                mNetworkAgent.sendLinkPropertiesImpl(linkProperties);
             }
         }
 
@@ -539,28 +568,12 @@ public class EthernetNetworkFactory extends NetworkFactory {
             mLinkProperties.clear();
         }
 
-        private void updateAgent() {
-            if (mNetworkAgent == null) return;
-            if (DBG) {
-                Log.i(TAG, "Updating mNetworkAgent with: " +
-                        mCapabilities + ", " +
-                        mLinkProperties);
-            }
-            mNetworkAgent.sendNetworkCapabilities(mCapabilities);
-            mNetworkAgent.sendLinkProperties(mLinkProperties);
-
-            // As a note, getNetworkScore() is fairly expensive to calculate. This is fine for now
-            // since the agent isn't updated frequently. Consider caching the score in the future if
-            // agent updating is required more often
-            mNetworkAgent.sendNetworkScore(getNetworkScore());
-        }
-
         private static void provisionIpClient(IIpClient ipClient, IpConfiguration config,
                 String tcpBufferSizes) {
             if (config.getProxySettings() == ProxySettings.STATIC ||
                     config.getProxySettings() == ProxySettings.PAC) {
                 try {
-                    ipClient.setHttpProxy(toStableParcelable(config.getHttpProxy()));
+                    ipClient.setHttpProxy(config.getHttpProxy());
                 } catch (RemoteException e) {
                     e.rethrowFromSystemServer();
                 }
