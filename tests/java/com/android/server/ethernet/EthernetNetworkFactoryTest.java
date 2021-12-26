@@ -44,7 +44,6 @@ import android.net.NetworkProvider;
 import android.net.NetworkRequest;
 import android.net.ip.IIpClient;
 import android.net.ip.IpClientCallbacks;
-import android.net.util.InterfaceParams;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.test.TestLooper;
@@ -53,6 +52,7 @@ import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
 
 import com.android.internal.R;
+import com.android.net.module.util.InterfaceParams;
 
 import org.junit.After;
 import org.junit.Before;
@@ -433,5 +433,21 @@ public class EthernetNetworkFactoryTest {
         createAndVerifyProvisionedInterface(iface, NetworkCapabilities.TRANSPORT_TEST,
                 ConnectivityManager.TYPE_NONE);
         mNetFactory.removeInterface(iface);
+    }
+
+    @Test
+    public void testReachabilityLoss() throws Exception {
+        String iface = "eth0";
+        createAndVerifyProvisionedInterface(iface);
+
+        mIpClientCallbacks.onReachabilityLost("ReachabilityLost");
+        mLooper.dispatchAll();
+
+        // Reachability loss should trigger a stop and start, since the interface is still there
+        verify(mIpClient).shutdown();
+        verify(mNetworkAgent).unregister();
+
+        verify(mDeps).makeIpClient(any(Context.class), anyString(), any());
+        verify(mIpClient).startProvisioning(any());
     }
 }
