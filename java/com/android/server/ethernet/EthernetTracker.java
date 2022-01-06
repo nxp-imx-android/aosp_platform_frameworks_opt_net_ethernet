@@ -18,12 +18,15 @@ package com.android.server.ethernet;
 
 import static android.net.TestNetworkManager.TEST_TAP_PREFIX;
 
+import static com.android.internal.annotations.VisibleForTesting.Visibility.PACKAGE;
+
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.IEthernetServiceListener;
 import android.net.INetd;
 import android.net.ITetheredInterfaceCallback;
-import android.net.InterfaceConfiguration;
+import android.net.InterfaceConfigurationParcel;
 import android.net.IpConfiguration;
 import android.net.IpConfiguration.IpAssignment;
 import android.net.IpConfiguration.ProxySettings;
@@ -32,20 +35,18 @@ import android.net.NetworkCapabilities;
 import android.net.StaticIpConfiguration;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.INetworkManagementService;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
-import android.os.ServiceManager;
+import android.os.ServiceSpecificException;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
-import android.net.util.NetdService;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
+import com.android.net.module.util.BaseNetdUnsolicitedEventListener;
 import com.android.net.module.util.NetdUtils;
 import com.android.net.module.util.PermissionUtils;
-import com.android.server.net.BaseNetworkObserver;
 
 import java.io.FileDescriptor;
 import java.net.InetAddress;
@@ -68,12 +69,13 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>All public or package private methods must be thread-safe unless stated otherwise.
  */
-final class EthernetTracker {
+@VisibleForTesting(visibility = PACKAGE)
+public class EthernetTracker {
     private static final int INTERFACE_MODE_CLIENT = 1;
     private static final int INTERFACE_MODE_SERVER = 2;
 
-    private final static String TAG = EthernetTracker.class.getSimpleName();
-    private final static boolean DBG = EthernetNetworkFactory.DBG;
+    private static final String TAG = EthernetTracker.class.getSimpleName();
+    private static final boolean DBG = EthernetNetworkFactory.DBG;
 
     private static final String TEST_IFACE_REGEXP = TEST_TAP_PREFIX + "\\d+";
 
@@ -91,7 +93,6 @@ final class EthernetTracker {
             new ConcurrentHashMap<>();
 
     private final Context mContext;
-    private final INetworkManagementService mNMService;
     private final INetd mNetd;
     private final Handler mHandler;
     private final EthernetNetworkFactory mFactory;
@@ -109,7 +110,8 @@ final class EthernetTracker {
     private boolean mTetheredInterfaceWasAvailable = false;
     private volatile IpConfiguration mIpConfigForDefaultInterface;
 
-    private class TetheredInterfaceRequestList extends RemoteCallbackList<ITetheredInterfaceCallback> {
+    private class TetheredInterfaceRequestList extends
+            RemoteCallbackList<ITetheredInterfaceCallback> {
         @Override
         public void onCallbackDied(ITetheredInterfaceCallback cb, Object cookie) {
             mHandler.post(EthernetTracker.this::maybeUntetherDefaultInterface);
@@ -121,9 +123,9 @@ final class EthernetTracker {
         mHandler = handler;
 
         // The services we use.
-        IBinder b = ServiceManager.getService(Context.NETWORKMANAGEMENT_SERVICE);
-        mNMService = INetworkManagementService.Stub.asInterface(b);
-        mNetd = Objects.requireNonNull(NetdService.getInstance(), "could not get netd instance");
+        mNetd = INetd.Stub.asInterface(
+                (IBinder) context.getSystemService(Context.NETD_SERVICE));
+        Objects.requireNonNull(mNetd, "could not get netd instance");
 
         // Interface match regex.
         updateIfaceMatchRegexp();
@@ -139,10 +141,10 @@ final class EthernetTracker {
 
         NetworkCapabilities nc = createNetworkCapabilities(true /* clear default capabilities */);
         mFactory = new EthernetNetworkFactory(handler, context, nc);
-        mFactory.register();
     }
 
     void start() {
+        mFactory.register();
         mConfigStore.read();
 
         // Default interface is just the first one we want to track.
@@ -153,8 +155,9 @@ final class EthernetTracker {
         }
 
         try {
-            mNMService.registerObserver(new InterfaceObserver());
-        } catch (RemoteException e) {
+            PermissionUtils.enforceNetworkStackPermission(mContext);
+            mNetd.registerUnsolicitedEventListener(new InterfaceObserver());
+        } catch (RemoteException | ServiceSpecificException e) {
             Log.e(TAG, "Could not register InterfaceObserver " + e);
         }
 
@@ -176,7 +179,8 @@ final class EthernetTracker {
         return mIpConfigurations.get(iface);
     }
 
-    boolean isTrackingInterface(String iface) {
+    @VisibleForTesting(visibility = PACKAGE)
+    protected boolean isTrackingInterface(String iface) {
         return mFactory.hasInterface(iface);
     }
 
@@ -284,24 +288,24 @@ final class EthernetTracker {
     }
 
     private void addInterface(String iface) {
-        InterfaceConfiguration config = null;
+        InterfaceConfigurationParcel config = null;
         // Bring up the interface so we get link status indications.
         try {
             PermissionUtils.enforceNetworkStackPermission(mContext);
             NetdUtils.setInterfaceUp(mNetd, iface);
-            config = mNMService.getInterfaceConfig(iface);
-        } catch (RemoteException | IllegalStateException e) {
+            config = NetdUtils.getInterfaceConfigParcel(mNetd, iface);
+        } catch (IllegalStateException e) {
             // Either the system is crashing or the interface has disappeared. Just ignore the
             // error; we haven't modified any state because we only do that if our calls succeed.
             Log.e(TAG, "Error upping interface " + iface, e);
         }
 
         if (config == null) {
-            Log.e(TAG, "Null interface config for " + iface + ". Bailing out.");
+            Log.e(TAG, "Null interface config parcelable for " + iface + ". Bailing out.");
             return;
         }
 
-        final String hwAddress = config.getHardwareAddress();
+        final String hwAddress = config.hwAddr;
 
         NetworkCapabilities nc = mNetworkCapabilities.get(iface);
         if (nc == null) {
@@ -329,7 +333,7 @@ final class EthernetTracker {
         // Note: if the interface already has link (e.g., if we crashed and got
         // restarted while it was running), we need to fake a link up notification so we
         // start configuring it.
-        if (config.hasFlag("running")) {
+        if (NetdUtils.hasFlag(config, "running")) {
             updateInterfaceState(iface, true);
         }
     }
@@ -406,20 +410,19 @@ final class EthernetTracker {
 
     private void trackAvailableInterfaces() {
         try {
-            final String[] ifaces = mNMService.listInterfaces();
+            final String[] ifaces = mNetd.interfaceGetList();
             for (String iface : ifaces) {
                 maybeTrackInterface(iface);
             }
-        } catch (RemoteException | IllegalStateException e) {
+        } catch (RemoteException | ServiceSpecificException e) {
             Log.e(TAG, "Could not get list of interfaces " + e);
         }
     }
 
-
-    private class InterfaceObserver extends BaseNetworkObserver {
+    private class InterfaceObserver extends BaseNetdUnsolicitedEventListener {
 
         @Override
-        public void interfaceLinkStateChanged(String iface, boolean up) {
+        public void onInterfaceLinkStateChanged(String iface, boolean up) {
             if (DBG) {
                 Log.i(TAG, "interfaceLinkStateChanged, iface: " + iface + ", up: " + up);
             }
@@ -427,12 +430,12 @@ final class EthernetTracker {
         }
 
         @Override
-        public void interfaceAdded(String iface) {
+        public void onInterfaceAdded(String iface) {
             mHandler.post(() -> maybeTrackInterface(iface));
         }
 
         @Override
-        public void interfaceRemoved(String iface) {
+        public void onInterfaceRemoved(String iface) {
             mHandler.post(() -> stopTrackingInterface(iface));
         }
     }
@@ -453,19 +456,22 @@ final class EthernetTracker {
      * <interface name|mac address>;[Network Capabilities];[IP config];[Override Transport]}
      */
     private void parseEthernetConfig(String configString) {
-        String[] tokens = configString.split(";", /* limit of tokens */ 4);
-        String name = tokens[0];
-        String capabilities = tokens.length > 1 ? tokens[1] : null;
-        String transport = tokens.length > 3 ? tokens[3] : null;
+        final EthernetTrackerConfig config = createEthernetTrackerConfig(configString);
         NetworkCapabilities nc = createNetworkCapabilities(
-                !TextUtils.isEmpty(capabilities)  /* clear default capabilities */, capabilities,
-                transport).build();
-        mNetworkCapabilities.put(name, nc);
+                !TextUtils.isEmpty(config.mCapabilities)  /* clear default capabilities */,
+                config.mCapabilities, config.mTransport).build();
+        mNetworkCapabilities.put(config.mName, nc);
 
-        if (tokens.length > 2 && !TextUtils.isEmpty(tokens[2])) {
-            IpConfiguration ipConfig = parseStaticIpConfiguration(tokens[2]);
-            mIpConfigurations.put(name, ipConfig);
+        if (null != config.mIpConfig) {
+            IpConfiguration ipConfig = parseStaticIpConfiguration(config.mIpConfig);
+            mIpConfigurations.put(config.mName, ipConfig);
         }
+    }
+
+    @VisibleForTesting
+    static EthernetTrackerConfig createEthernetTrackerConfig(@NonNull final String configString) {
+        Objects.requireNonNull(configString, "EthernetTrackerConfig requires non-null config");
+        return new EthernetTrackerConfig(configString.split(";", /* limit of tokens */ 4));
     }
 
     private static NetworkCapabilities createDefaultNetworkCapabilities(boolean isTestIface) {
@@ -479,9 +485,9 @@ final class EthernetTracker {
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VCN_MANAGED);
 
         if (isTestIface) {
-                builder.addTransportType(NetworkCapabilities.TRANSPORT_TEST);
+            builder.addTransportType(NetworkCapabilities.TRANSPORT_TEST);
         } else {
-                builder.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            builder.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
         }
 
         return builder.build();
@@ -671,5 +677,21 @@ final class EthernetTracker {
 
             mFactory.dump(fd, pw, args);
         });
+    }
+
+    @VisibleForTesting
+    static class EthernetTrackerConfig {
+        final String mName;
+        final String mCapabilities;
+        final String mIpConfig;
+        final String mTransport;
+
+        EthernetTrackerConfig(@NonNull final String[] tokens) {
+            Objects.requireNonNull(tokens, "EthernetTrackerConfig requires non-null tokens");
+            mName = tokens[0];
+            mCapabilities = tokens.length > 1 ? tokens[1] : null;
+            mIpConfig = tokens.length > 2 && !TextUtils.isEmpty(tokens[2]) ? tokens[2] : null;
+            mTransport = tokens.length > 3 ? tokens[3] : null;
+        }
     }
 }
