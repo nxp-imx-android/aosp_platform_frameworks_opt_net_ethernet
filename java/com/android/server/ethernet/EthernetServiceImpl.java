@@ -28,11 +28,11 @@ import android.net.InternalNetworkUpdateRequest;
 import android.net.IpConfiguration;
 import android.os.Binder;
 import android.os.Handler;
-import android.os.HandlerThread;
 import android.os.RemoteException;
 import android.util.Log;
 import android.util.PrintWriterPrinter;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.net.module.util.PermissionUtils;
 
@@ -48,51 +48,50 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class EthernetServiceImpl extends IEthernetManager.Stub {
     private static final String TAG = "EthernetServiceImpl";
 
+    @VisibleForTesting
+    final AtomicBoolean mStarted = new AtomicBoolean(false);
     private final Context mContext;
-    private final AtomicBoolean mStarted = new AtomicBoolean(false);
+    private final Handler mHandler;
+    private final EthernetTracker mTracker;
 
-    private Handler mHandler;
-    private EthernetTracker mTracker;
-
-    public EthernetServiceImpl(Context context) {
+    EthernetServiceImpl(@NonNull final Context context, @NonNull final Handler handler,
+            @NonNull final EthernetTracker tracker) {
         mContext = context;
+        mHandler = handler;
+        mTracker = tracker;
     }
 
-    private void enforceAccessPermission() {
-        mContext.enforceCallingOrSelfPermission(
-                android.Manifest.permission.ACCESS_NETWORK_STATE,
-                "EthernetService");
+    private void enforceAutomotiveDevice(final @NonNull String methodName) {
+        PermissionUtils.enforceSystemFeature(mContext, PackageManager.FEATURE_AUTOMOTIVE,
+                methodName + " is only available on automotive devices.");
     }
 
-    private void enforceUseRestrictedNetworksPermission() {
-        mContext.enforceCallingOrSelfPermission(
-                android.Manifest.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS,
-                "ConnectivityService");
+    private void enforceInterfaceIsTracked(final @NonNull String iface) {
+        if(!mTracker.isTrackingInterface(iface)) {
+            throw new UnsupportedOperationException("The given iface is not currently tracked.");
+        }
     }
 
     private boolean checkUseRestrictedNetworksPermission() {
-        return mContext.checkCallingOrSelfPermission(
-                android.Manifest.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS)
-                == PackageManager.PERMISSION_GRANTED;
+        return PermissionUtils.checkAnyPermissionOf(mContext,
+                android.Manifest.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS);
     }
 
     public void start() {
         Log.i(TAG, "Starting Ethernet service");
-
-        HandlerThread handlerThread = new HandlerThread("EthernetServiceThread");
-        handlerThread.start();
-        mHandler = new Handler(handlerThread.getLooper());
-
-        mTracker = new EthernetTracker(mContext, mHandler);
         mTracker.start();
-
         mStarted.set(true);
+    }
+
+    private void logIfEthernetNotStarted() {
+        if (!mStarted.get()) {
+            throw new IllegalStateException("System isn't ready to change ethernet configurations");
+        }
     }
 
     @Override
     public String[] getAvailableInterfaces() throws RemoteException {
-        enforceAccessPermission();
-
+        PermissionUtils.enforceAccessNetworkStatePermission(mContext, TAG);
         return mTracker.getInterfaces(checkUseRestrictedNetworksPermission());
     }
 
@@ -102,10 +101,9 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
      */
     @Override
     public IpConfiguration getConfiguration(String iface) {
-        enforceAccessPermission();
-
+        PermissionUtils.enforceAccessNetworkStatePermission(mContext, TAG);
         if (mTracker.isRestrictedInterface(iface)) {
-            enforceUseRestrictedNetworksPermission();
+            PermissionUtils.enforceRestrictedNetworkPermission(mContext, TAG);
         }
 
         return new IpConfiguration(mTracker.getIpConfiguration(iface));
@@ -116,14 +114,11 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
      */
     @Override
     public void setConfiguration(String iface, IpConfiguration config) {
-        if (!mStarted.get()) {
-            Log.w(TAG, "System isn't ready enough to change ethernet configuration");
-        }
+        logIfEthernetNotStarted();
 
         PermissionUtils.enforceNetworkStackPermission(mContext);
-
         if (mTracker.isRestrictedInterface(iface)) {
-            enforceUseRestrictedNetworksPermission();
+            PermissionUtils.enforceRestrictedNetworkPermission(mContext, TAG);
         }
 
         // TODO: this does not check proxy settings, gateways, etc.
@@ -136,10 +131,9 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
      */
     @Override
     public boolean isAvailable(String iface) {
-        enforceAccessPermission();
-
+        PermissionUtils.enforceAccessNetworkStatePermission(mContext, TAG);
         if (mTracker.isRestrictedInterface(iface)) {
-            enforceUseRestrictedNetworksPermission();
+            PermissionUtils.enforceRestrictedNetworkPermission(mContext, TAG);
         }
 
         return mTracker.isTrackingInterface(iface);
@@ -153,7 +147,7 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         if (listener == null) {
             throw new IllegalArgumentException("listener must not be null");
         }
-        enforceAccessPermission();
+        PermissionUtils.enforceAccessNetworkStatePermission(mContext, TAG);
         mTracker.addListener(listener, checkUseRestrictedNetworksPermission());
     }
 
@@ -165,7 +159,7 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         if (listener == null) {
             throw new IllegalArgumentException("listener must not be null");
         }
-        enforceAccessPermission();
+        PermissionUtils.enforceAccessNetworkStatePermission(mContext, TAG);
         mTracker.removeListener(listener);
     }
 
@@ -214,23 +208,44 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         pw.decreaseIndent();
     }
 
+    /**
+     * Validate the state of ethernet for APIs tied to network management.
+     *
+     * @param iface the ethernet interface name to operate on.
+     * @param methodName the name of the calling method.
+     */
+    private void validateNetworkManagementState(@NonNull final String iface,
+            final @NonNull String methodName) {
+        logIfEthernetNotStarted();
+
+        // TODO: add permission check here for MANAGE_INTERNAL_NETWORKS when it's available.
+        Objects.requireNonNull(iface, "Pass a non-null iface.");
+        Objects.requireNonNull(methodName, "Pass a non-null methodName.");
+        enforceAutomotiveDevice(methodName);
+        enforceInterfaceIsTracked(iface);
+    }
+
     @Override
     public void updateConfiguration(@NonNull final String iface,
             @NonNull final InternalNetworkUpdateRequest request,
             @Nullable final IInternalNetworkManagementListener listener) {
         Log.i(TAG, "updateConfiguration called with: iface=" + iface
                 + ", request=" + request + ", listener=" + listener);
+        validateNetworkManagementState(iface, "updateConfiguration()");
+        // TODO: validate that iface is listed in overlay config_ethernet_interfaces
     }
 
     @Override
     public void connectNetwork(@NonNull final String iface,
             @Nullable final IInternalNetworkManagementListener listener) {
         Log.i(TAG, "connectNetwork called with: iface=" + iface + ", listener=" + listener);
+        validateNetworkManagementState(iface, "connectNetwork()");
     }
 
     @Override
     public void disconnectNetwork(@NonNull final String iface,
             @Nullable final IInternalNetworkManagementListener listener) {
         Log.i(TAG, "disconnectNetwork called with: iface=" + iface + ", listener=" + listener);
+        validateNetworkManagementState(iface, "disconnectNetwork()");
     }
 }
