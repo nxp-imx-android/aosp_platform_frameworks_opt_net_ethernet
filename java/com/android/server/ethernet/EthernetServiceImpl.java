@@ -22,9 +22,9 @@ import android.content.Context;
 import android.content.pm.PackageManager;
 import android.net.IEthernetManager;
 import android.net.IEthernetServiceListener;
-import android.net.IInternalNetworkManagementListener;
+import android.net.IEthernetNetworkManagementListener;
 import android.net.ITetheredInterfaceCallback;
-import android.net.InternalNetworkUpdateRequest;
+import android.net.EthernetNetworkUpdateRequest;
 import android.net.IpConfiguration;
 import android.os.Binder;
 import android.os.Handler;
@@ -208,6 +208,12 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         pw.decreaseIndent();
     }
 
+    private void enforceNetworkManagementPermission() {
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.MANAGE_ETHERNET_NETWORKS,
+                "EthernetServiceImpl");
+    }
+
     /**
      * Validate the state of ethernet for APIs tied to network management.
      *
@@ -216,19 +222,19 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
      */
     private void validateNetworkManagementState(@NonNull final String iface,
             final @NonNull String methodName) {
+        enforceAutomotiveDevice(methodName);
+        enforceNetworkManagementPermission();
         logIfEthernetNotStarted();
 
-        // TODO: add permission check here for MANAGE_INTERNAL_NETWORKS when it's available.
         Objects.requireNonNull(iface, "Pass a non-null iface.");
         Objects.requireNonNull(methodName, "Pass a non-null methodName.");
-        enforceAutomotiveDevice(methodName);
         enforceInterfaceIsTracked(iface);
     }
 
     @Override
     public void updateConfiguration(@NonNull final String iface,
-            @NonNull final InternalNetworkUpdateRequest request,
-            @Nullable final IInternalNetworkManagementListener listener) {
+            @NonNull final EthernetNetworkUpdateRequest request,
+            @Nullable final IEthernetNetworkManagementListener listener) {
         Log.i(TAG, "updateConfiguration called with: iface=" + iface
                 + ", request=" + request + ", listener=" + listener);
         validateNetworkManagementState(iface, "updateConfiguration()");
@@ -240,15 +246,17 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
 
     @Override
     public void connectNetwork(@NonNull final String iface,
-            @Nullable final IInternalNetworkManagementListener listener) {
+            @Nullable final IEthernetNetworkManagementListener listener) {
         Log.i(TAG, "connectNetwork called with: iface=" + iface + ", listener=" + listener);
         validateNetworkManagementState(iface, "connectNetwork()");
+        mTracker.connectNetwork(iface, listener);
     }
 
     @Override
     public void disconnectNetwork(@NonNull final String iface,
-            @Nullable final IInternalNetworkManagementListener listener) {
+            @Nullable final IEthernetNetworkManagementListener listener) {
         Log.i(TAG, "disconnectNetwork called with: iface=" + iface + ", listener=" + listener);
         validateNetworkManagementState(iface, "disconnectNetwork()");
+        mTracker.disconnectNetwork(iface, listener);
     }
 }

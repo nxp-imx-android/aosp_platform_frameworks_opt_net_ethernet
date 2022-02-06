@@ -24,7 +24,7 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.IEthernetServiceListener;
-import android.net.IInternalNetworkManagementListener;
+import android.net.IEthernetNetworkManagementListener;
 import android.net.INetd;
 import android.net.ITetheredInterfaceCallback;
 import android.net.InterfaceConfigurationParcel;
@@ -178,7 +178,7 @@ public class EthernetTracker {
     protected void updateConfiguration(@NonNull final String iface,
             @NonNull final StaticIpConfiguration staticIpConfig,
             @NonNull final NetworkCapabilities capabilities,
-            @Nullable final IInternalNetworkManagementListener listener) {
+            @Nullable final IEthernetNetworkManagementListener listener) {
         if (DBG) {
             Log.i(TAG, "updateConfiguration, iface: " + iface + ", capabilities: " + capabilities
                     + ", staticIpConfig: " + staticIpConfig);
@@ -188,6 +188,18 @@ public class EthernetTracker {
         mNetworkCapabilities.put(iface, capabilities);
         mHandler.post(() ->
                 mFactory.updateInterface(iface, ipConfig, capabilities, listener));
+    }
+
+    @VisibleForTesting(visibility = PACKAGE)
+    protected void connectNetwork(@NonNull final String iface,
+            @Nullable final IEthernetNetworkManagementListener listener) {
+        mHandler.post(() -> updateInterfaceState(iface, true, listener));
+    }
+
+    @VisibleForTesting(visibility = PACKAGE)
+    protected void disconnectNetwork(@NonNull final String iface,
+            @Nullable final IEthernetNetworkManagementListener listener) {
+        mHandler.post(() -> updateInterfaceState(iface, false, listener));
     }
 
     IpConfiguration getIpConfiguration(String iface) {
@@ -354,9 +366,14 @@ public class EthernetTracker {
     }
 
     private void updateInterfaceState(String iface, boolean up) {
+        updateInterfaceState(iface, up, null /* listener */);
+    }
+
+    private void updateInterfaceState(@NonNull final String iface, final boolean up,
+            @Nullable final IEthernetNetworkManagementListener listener) {
         final int mode = getInterfaceMode(iface);
         final boolean factoryLinkStateUpdated = (mode == INTERFACE_MODE_CLIENT)
-                && mFactory.updateInterfaceLinkState(iface, up);
+                && mFactory.updateInterfaceLinkState(iface, up, listener);
 
         if (factoryLinkStateUpdated) {
             boolean restricted = isRestrictedInterface(iface);
