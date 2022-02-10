@@ -362,7 +362,7 @@ public class EthernetNetworkFactoryTest {
 
         assertFalse(ret);
         verifyNoStopOrStart();
-        assertFailedListener(listener, "can't be updated as it is not configured");
+        assertFailedListener(listener, "can't be updated as it is not available");
     }
 
     @Test
@@ -456,9 +456,10 @@ public class EthernetNetworkFactoryTest {
                 .build();
         mNetFactory.needNetworkFor(specificNetRequest);
 
-        // TODO(b/155707957): BUG: IPClient should not be started when the interface link state
-        //  is down.
-        verify(mDeps).makeIpClient(any(), any(), any());
+        verify(mDeps, never()).makeIpClient(any(), any(), any());
+
+        mNetFactory.updateInterfaceLinkState(TEST_IFACE, true, NULL_LISTENER);
+        verify(mDeps).makeIpClient(any(), eq(TEST_IFACE), any());
     }
 
     @Test
