@@ -20,6 +20,7 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.ConnectivityManager;
+import android.net.EthernetManager;
 import android.net.EthernetNetworkSpecifier;
 import android.net.IEthernetNetworkManagementListener;
 import android.net.EthernetNetworkManagementException;
@@ -176,14 +177,30 @@ public class EthernetNetworkFactory extends NetworkFactory {
             return;
         }
 
+        final NetworkCapabilities nc = new NetworkCapabilities.Builder(capabilities)
+                .setNetworkSpecifier(new EthernetNetworkSpecifier(ifaceName))
+                .build();
+
         if (DBG) {
-            Log.d(TAG, "addInterface, iface: " + ifaceName + ", capabilities: " + capabilities);
+            Log.d(TAG, "addInterface, iface: " + ifaceName + ", capabilities: " + nc);
         }
 
         final NetworkInterfaceState iface = new NetworkInterfaceState(
-                ifaceName, hwAddress, mHandler, mContext, ipConfig, capabilities, this, mDeps);
+                ifaceName, hwAddress, mHandler, mContext, ipConfig, nc, this, mDeps);
         mTrackingInterfaces.put(ifaceName, iface);
         updateCapabilityFilter();
+    }
+
+    @VisibleForTesting
+    protected int getInterfaceState(@NonNull String iface) {
+        final NetworkInterfaceState interfaceState = mTrackingInterfaces.get(iface);
+        if (interfaceState == null) {
+            return EthernetManager.STATE_ABSENT;
+        } else if (!interfaceState.mLinkUp) {
+            return EthernetManager.STATE_LINK_DOWN;
+        } else {
+            return EthernetManager.STATE_LINK_UP;
+        }
     }
 
     /**
@@ -203,18 +220,15 @@ public class EthernetNetworkFactory extends NetworkFactory {
             @NonNull final IpConfiguration ipConfig,
             @Nullable final NetworkCapabilities capabilities,
             @Nullable final IEthernetNetworkManagementListener listener) {
-        enforceInterfaceIsTracked(ifaceName);
+        if (!hasInterface(ifaceName)) {
+            maybeSendNetworkManagementCallbackForUntracked(ifaceName, listener);
+            return;
+        }
+
         final NetworkInterfaceState iface = mTrackingInterfaces.get(ifaceName);
         iface.updateInterface(ipConfig, capabilities, listener);
         mTrackingInterfaces.put(ifaceName, iface);
         updateCapabilityFilter();
-    }
-
-    private void enforceInterfaceIsTracked(@NonNull final String ifaceName) {
-        if (!hasInterface(ifaceName)) {
-            throw new UnsupportedOperationException(
-                    "Interface with name " + ifaceName + " is not being tracked.");
-        }
     }
 
     private static NetworkCapabilities mixInCapabilities(NetworkCapabilities nc,
@@ -255,10 +269,8 @@ public class EthernetNetworkFactory extends NetworkFactory {
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
     protected boolean updateInterfaceLinkState(@NonNull final String ifaceName, final boolean up,
             @Nullable final IEthernetNetworkManagementListener listener) {
-        if (!mTrackingInterfaces.containsKey(ifaceName)) {
-            maybeSendNetworkManagementCallback(listener, null,
-                    new EthernetNetworkManagementException(
-                            ifaceName + " can't be updated as it is not available."));
+        if (!hasInterface(ifaceName)) {
+            maybeSendNetworkManagementCallbackForUntracked(ifaceName, listener);
             return false;
         }
 
@@ -270,7 +282,15 @@ public class EthernetNetworkFactory extends NetworkFactory {
         return iface.updateLinkState(up, listener);
     }
 
-    boolean hasInterface(String ifaceName) {
+    private void maybeSendNetworkManagementCallbackForUntracked(
+            String ifaceName, IEthernetNetworkManagementListener listener) {
+        maybeSendNetworkManagementCallback(listener, null,
+                new EthernetNetworkManagementException(
+                        ifaceName + " can't be updated as it is not available."));
+    }
+
+    @VisibleForTesting
+    protected boolean hasInterface(String ifaceName) {
         return mTrackingInterfaces.containsKey(ifaceName);
     }
 

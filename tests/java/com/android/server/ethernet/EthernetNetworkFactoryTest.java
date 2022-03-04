@@ -31,6 +31,7 @@ import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -71,6 +72,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -265,8 +267,12 @@ public class EthernetNetworkFactoryTest {
         triggerOnProvisioningSuccess();
         // provisioning succeeded, verify that the network agent is created, registered, marked
         // as connected and legacy type are correctly set.
-        verify(mDeps).makeEthernetNetworkAgent(any(), any(), any(), any(),
+        final ArgumentCaptor<NetworkCapabilities> ncCaptor = ArgumentCaptor.forClass(
+                NetworkCapabilities.class);
+        verify(mDeps).makeEthernetNetworkAgent(any(), any(), ncCaptor.capture(), any(),
                 argThat(x -> x.getLegacyType() == expectedLegacyType), any(), any());
+        assertEquals(
+                new EthernetNetworkSpecifier(iface), ncCaptor.getValue().getNetworkSpecifier());
         verifyNetworkAgentRegistersAndConnects();
         clearInvocations(mDeps);
         clearInvocations(mNetworkAgent);
@@ -450,16 +456,21 @@ public class EthernetNetworkFactoryTest {
 
         mNetFactory.needNetworkFor(createDefaultRequest());
 
+        verify(mDeps, never()).makeIpClient(any(), any(), any());
+
+        // BUG(b/191854824): requesting a network with a specifier (Android Auto use case) should
+        // not start an IpClient when the link is down, but fixing this may make matters worse by
+        // tiggering b/197548738.
         NetworkRequest specificNetRequest = new NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
                 .setNetworkSpecifier(new EthernetNetworkSpecifier(TEST_IFACE))
                 .build();
         mNetFactory.needNetworkFor(specificNetRequest);
-
-        verify(mDeps, never()).makeIpClient(any(), any(), any());
+        mNetFactory.releaseNetworkFor(specificNetRequest);
 
         mNetFactory.updateInterfaceLinkState(TEST_IFACE, true, NULL_LISTENER);
-        verify(mDeps).makeIpClient(any(), eq(TEST_IFACE), any());
+        // TODO: change to once when b/191854824 is fixed.
+        verify(mDeps, times(2)).makeIpClient(any(), eq(TEST_IFACE), any());
     }
 
     @Test
@@ -751,5 +762,19 @@ public class EthernetNetworkFactoryTest {
         verify(mDeps).makeEthernetNetworkAgent(any(), any(),
                 eq(capabilities), any(), any(), any(), any());
         verifyRestart(ipConfiguration);
+    }
+
+    @Test
+    public void testUpdateInterfaceForNonExistingInterface() throws Exception {
+        initEthernetNetworkFactory();
+        // No interface exists due to not calling createAndVerifyProvisionedInterface(...).
+        final NetworkCapabilities capabilities = createDefaultFilterCaps();
+        final IpConfiguration ipConfiguration = createStaticIpConfig();
+        final TestNetworkManagementListener listener = new TestNetworkManagementListener();
+
+        mNetFactory.updateInterface(TEST_IFACE, ipConfiguration, capabilities, listener);
+
+        verifyNoStopOrStart();
+        assertFailedListener(listener, "can't be updated as it is not available");
     }
 }
