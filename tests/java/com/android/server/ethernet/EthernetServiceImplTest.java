@@ -32,7 +32,6 @@ import android.net.IEthernetNetworkManagementListener;
 import android.net.EthernetNetworkUpdateRequest;
 import android.net.IpConfiguration;
 import android.net.NetworkCapabilities;
-import android.net.StaticIpConfiguration;
 import android.os.Handler;
 
 import androidx.test.filters.SmallTest;
@@ -49,8 +48,10 @@ import org.mockito.MockitoAnnotations;
 public class EthernetServiceImplTest {
     private static final String TEST_IFACE = "test123";
     private static final EthernetNetworkUpdateRequest UPDATE_REQUEST =
-            new EthernetNetworkUpdateRequest(
-                    new StaticIpConfiguration(), new NetworkCapabilities.Builder().build());
+            new EthernetNetworkUpdateRequest.Builder()
+                    .setIpConfiguration(new IpConfiguration())
+                    .setNetworkCapabilities(new NetworkCapabilities.Builder().build())
+                    .build();
     private static final IEthernetNetworkManagementListener NULL_LISTENER = null;
     private EthernetServiceImpl mEthernetServiceImpl;
     @Mock private Context mContext;
@@ -155,30 +156,6 @@ public class EthernetServiceImplTest {
         });
     }
 
-    @Test
-    public void testUpdateConfigurationRejectsWithUntrackedIface() {
-        shouldTrackIface(TEST_IFACE, false);
-        assertThrows(UnsupportedOperationException.class, () -> {
-            mEthernetServiceImpl.updateConfiguration(TEST_IFACE, UPDATE_REQUEST, NULL_LISTENER);
-        });
-    }
-
-    @Test
-    public void testConnectNetworkRejectsWithUntrackedIface() {
-        shouldTrackIface(TEST_IFACE, false);
-        assertThrows(UnsupportedOperationException.class, () -> {
-            mEthernetServiceImpl.connectNetwork(TEST_IFACE, NULL_LISTENER);
-        });
-    }
-
-    @Test
-    public void testDisconnectNetworkRejectsWithUntrackedIface() {
-        shouldTrackIface(TEST_IFACE, false);
-        assertThrows(UnsupportedOperationException.class, () -> {
-            mEthernetServiceImpl.disconnectNetwork(TEST_IFACE, NULL_LISTENER);
-        });
-    }
-
     private void denyManageEthPermission() {
         doThrow(new SecurityException("")).when(mContext)
                 .enforceCallingOrSelfPermission(
@@ -214,7 +191,7 @@ public class EthernetServiceImplTest {
         mEthernetServiceImpl.updateConfiguration(TEST_IFACE, UPDATE_REQUEST, NULL_LISTENER);
         verify(mEthernetTracker).updateConfiguration(
                 eq(TEST_IFACE),
-                eq(UPDATE_REQUEST.getIpConfig()),
+                eq(UPDATE_REQUEST.getIpConfiguration()),
                 eq(UPDATE_REQUEST.getNetworkCapabilities()), eq(NULL_LISTENER));
     }
 
