@@ -16,13 +16,17 @@
 
 package com.android.server.ethernet;
 
+import static android.net.NetworkCapabilities.TRANSPORT_TEST;
+
 import static org.junit.Assert.assertThrows;
 
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import android.Manifest;
 import android.annotation.NonNull;
@@ -51,6 +55,10 @@ public class EthernetServiceImplTest {
             new EthernetNetworkUpdateRequest.Builder()
                     .setIpConfiguration(new IpConfiguration())
                     .setNetworkCapabilities(new NetworkCapabilities.Builder().build())
+                    .build();
+    private static final EthernetNetworkUpdateRequest UPDATE_REQUEST_WITHOUT_CAPABILITIES =
+            new EthernetNetworkUpdateRequest.Builder()
+                    .setIpConfiguration(new IpConfiguration())
                     .build();
     private static final IEthernetNetworkManagementListener NULL_LISTENER = null;
     private EthernetServiceImpl mEthernetServiceImpl;
@@ -133,11 +141,21 @@ public class EthernetServiceImplTest {
     }
 
     @Test
-    public void testUpdateConfigurationRejectsWithoutAutomotiveFeature() {
+    public void testUpdateConfigurationWithCapabilitiesRejectsWithoutAutomotiveFeature() {
         toggleAutomotiveFeature(false);
         assertThrows(UnsupportedOperationException.class, () -> {
             mEthernetServiceImpl.updateConfiguration(TEST_IFACE, UPDATE_REQUEST, NULL_LISTENER);
         });
+    }
+
+    @Test
+    public void testUpdateConfigurationWithCapabilitiesWithAutomotiveFeature() {
+        toggleAutomotiveFeature(false);
+        mEthernetServiceImpl.updateConfiguration(TEST_IFACE, UPDATE_REQUEST_WITHOUT_CAPABILITIES,
+                NULL_LISTENER);
+        verify(mEthernetTracker).updateConfiguration(eq(TEST_IFACE),
+                eq(UPDATE_REQUEST_WITHOUT_CAPABILITIES.getIpConfiguration()),
+                eq(UPDATE_REQUEST_WITHOUT_CAPABILITIES.getNetworkCapabilities()), isNull());
     }
 
     @Test
@@ -160,6 +178,12 @@ public class EthernetServiceImplTest {
         doThrow(new SecurityException("")).when(mContext)
                 .enforceCallingOrSelfPermission(
                         eq(Manifest.permission.MANAGE_ETHERNET_NETWORKS), anyString());
+    }
+
+    private void denyManageTestNetworksPermission() {
+        doThrow(new SecurityException("")).when(mContext)
+                .enforceCallingOrSelfPermission(
+                        eq(Manifest.permission.MANAGE_TEST_NETWORKS), anyString());
     }
 
     @Test
@@ -186,6 +210,37 @@ public class EthernetServiceImplTest {
         });
     }
 
+    private void enableTestInterface() {
+        when(mEthernetTracker.isValidTestInterface(eq(TEST_IFACE))).thenReturn(true);
+    }
+
+    @Test
+    public void testUpdateConfigurationRejectsTestRequestWithoutTestPermission() {
+        enableTestInterface();
+        denyManageTestNetworksPermission();
+        assertThrows(SecurityException.class, () -> {
+            mEthernetServiceImpl.updateConfiguration(TEST_IFACE, UPDATE_REQUEST, NULL_LISTENER);
+        });
+    }
+
+    @Test
+    public void testConnectNetworkRejectsTestRequestWithoutTestPermission() {
+        enableTestInterface();
+        denyManageTestNetworksPermission();
+        assertThrows(SecurityException.class, () -> {
+            mEthernetServiceImpl.connectNetwork(TEST_IFACE, NULL_LISTENER);
+        });
+    }
+
+    @Test
+    public void testDisconnectNetworkRejectsTestRequestWithoutTestPermission() {
+        enableTestInterface();
+        denyManageTestNetworksPermission();
+        assertThrows(SecurityException.class, () -> {
+            mEthernetServiceImpl.disconnectNetwork(TEST_IFACE, NULL_LISTENER);
+        });
+    }
+
     @Test
     public void testUpdateConfiguration() {
         mEthernetServiceImpl.updateConfiguration(TEST_IFACE, UPDATE_REQUEST, NULL_LISTENER);
@@ -203,6 +258,71 @@ public class EthernetServiceImplTest {
 
     @Test
     public void testDisconnectNetwork() {
+        mEthernetServiceImpl.disconnectNetwork(TEST_IFACE, NULL_LISTENER);
+        verify(mEthernetTracker).disconnectNetwork(eq(TEST_IFACE), eq(NULL_LISTENER));
+    }
+
+    @Test
+    public void testUpdateConfigurationAcceptsTestRequestWithNullCapabilities() {
+        enableTestInterface();
+        final EthernetNetworkUpdateRequest request =
+                new EthernetNetworkUpdateRequest
+                        .Builder()
+                        .setIpConfiguration(new IpConfiguration()).build();
+        mEthernetServiceImpl.updateConfiguration(TEST_IFACE, request, NULL_LISTENER);
+        verify(mEthernetTracker).updateConfiguration(eq(TEST_IFACE),
+                eq(request.getIpConfiguration()),
+                eq(request.getNetworkCapabilities()), isNull());
+    }
+
+    @Test
+    public void testUpdateConfigurationRejectsInvalidTestRequest() {
+        enableTestInterface();
+        assertThrows(IllegalArgumentException.class, () -> {
+            mEthernetServiceImpl.updateConfiguration(TEST_IFACE, UPDATE_REQUEST, NULL_LISTENER);
+        });
+    }
+
+    private EthernetNetworkUpdateRequest createTestNetworkUpdateRequest() {
+        final NetworkCapabilities nc =  new NetworkCapabilities
+                .Builder(UPDATE_REQUEST.getNetworkCapabilities())
+                .addTransportType(TRANSPORT_TEST).build();
+
+        return new EthernetNetworkUpdateRequest
+                .Builder(UPDATE_REQUEST)
+                .setNetworkCapabilities(nc).build();
+    }
+
+    @Test
+    public void testUpdateConfigurationForTestRequestDoesNotRequireAutoOrEthernetPermission() {
+        enableTestInterface();
+        toggleAutomotiveFeature(false);
+        denyManageEthPermission();
+        final EthernetNetworkUpdateRequest request = createTestNetworkUpdateRequest();
+
+        mEthernetServiceImpl.updateConfiguration(TEST_IFACE, request, NULL_LISTENER);
+        verify(mEthernetTracker).updateConfiguration(
+                eq(TEST_IFACE),
+                eq(request.getIpConfiguration()),
+                eq(request.getNetworkCapabilities()), eq(NULL_LISTENER));
+    }
+
+    @Test
+    public void testConnectNetworkForTestRequestDoesNotRequireAutoOrNetPermission() {
+        enableTestInterface();
+        toggleAutomotiveFeature(false);
+        denyManageEthPermission();
+
+        mEthernetServiceImpl.connectNetwork(TEST_IFACE, NULL_LISTENER);
+        verify(mEthernetTracker).connectNetwork(eq(TEST_IFACE), eq(NULL_LISTENER));
+    }
+
+    @Test
+    public void testDisconnectNetworkForTestRequestDoesNotRequireAutoOrNetPermission() {
+        enableTestInterface();
+        toggleAutomotiveFeature(false);
+        denyManageEthPermission();
+
         mEthernetServiceImpl.disconnectNetwork(TEST_IFACE, NULL_LISTENER);
         verify(mEthernetTracker).disconnectNetwork(eq(TEST_IFACE), eq(NULL_LISTENER));
     }
