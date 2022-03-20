@@ -63,7 +63,7 @@ import android.util.Pair;
 import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
 
-import com.android.internal.R;
+import com.android.connectivity.resources.R;
 import com.android.net.module.util.InterfaceParams;
 
 import com.android.testutils.DevSdkIgnoreRule;
@@ -174,8 +174,7 @@ public class EthernetNetworkFactoryTest {
     }
 
     private void setupContext() {
-        when(mContext.getResources()).thenReturn(mResources);
-        when(mResources.getString(R.string.config_ethernet_tcp_buffers)).thenReturn("");
+        when(mDeps.getTcpBufferSizesFromResource(eq(mContext))).thenReturn("");
     }
 
     @After
@@ -280,19 +279,13 @@ public class EthernetNetworkFactoryTest {
 
     // creates an unprovisioned interface
     private void createUnprovisionedInterface(String iface) throws Exception {
-        // the only way to create an unprovisioned interface is by calling needNetworkFor
-        // followed by releaseNetworkFor which will stop the NetworkAgent and IpClient. When
-        // EthernetNetworkFactory#updateInterfaceLinkState(iface, true) is called, the interface
-        // is automatically provisioned even if nobody has ever called needNetworkFor
+        // To create an unprovisioned interface, provision and then "stop" it, i.e. stop its
+        // NetworkAgent and IpClient. One way this can be done is by provisioning an interface and
+        // then calling onNetworkUnwanted.
         createAndVerifyProvisionedInterface(iface);
 
-        // Interface is already provisioned, so startProvisioning / register should not be called
-        // again
-        mNetFactory.needNetworkFor(createDefaultRequest());
-        verify(mIpClient, never()).startProvisioning(any());
-        verify(mNetworkAgent, never()).register();
-
-        mNetFactory.releaseNetworkFor(createDefaultRequest());
+        mNetworkAgent.getCallbacks().onNetworkUnwanted();
+        mLooper.dispatchAll();
         verifyStop();
 
         clearInvocations(mIpClient);
@@ -776,5 +769,29 @@ public class EthernetNetworkFactoryTest {
 
         verifyNoStopOrStart();
         assertFailedListener(listener, "can't be updated as it is not available");
+    }
+
+    @Test
+    public void testUpdateInterfaceWithNullIpConfiguration() throws Exception {
+        initEthernetNetworkFactory();
+        createAndVerifyProvisionedInterface(TEST_IFACE);
+
+        final IpConfiguration initialIpConfig = createStaticIpConfig();
+        mNetFactory.updateInterface(TEST_IFACE, initialIpConfig, null /*capabilities*/,
+                null /*listener*/);
+        triggerOnProvisioningSuccess();
+        verifyRestart(initialIpConfig);
+
+        // TODO: have verifyXyz functions clear invocations.
+        clearInvocations(mDeps);
+        clearInvocations(mIpClient);
+        clearInvocations(mNetworkAgent);
+
+
+        // verify that sending a null ipConfig does not update the current ipConfig.
+        mNetFactory.updateInterface(TEST_IFACE, null /*ipConfig*/, null /*capabilities*/,
+                null /*listener*/);
+        triggerOnProvisioningSuccess();
+        verifyRestart(initialIpConfig);
     }
 }
