@@ -16,16 +16,19 @@
 
 package com.android.server.ethernet;
 
+import static android.net.NetworkCapabilities.TRANSPORT_TEST;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.net.IEthernetManager;
 import android.net.IEthernetServiceListener;
-import android.net.IInternalNetworkManagementListener;
+import android.net.INetworkInterfaceOutcomeReceiver;
 import android.net.ITetheredInterfaceCallback;
-import android.net.InternalNetworkUpdateRequest;
+import android.net.EthernetNetworkUpdateRequest;
 import android.net.IpConfiguration;
+import android.net.NetworkCapabilities;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.RemoteException;
@@ -66,12 +69,6 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
                 methodName + " is only available on automotive devices.");
     }
 
-    private void enforceInterfaceIsTracked(final @NonNull String iface) {
-        if(!mTracker.isTrackingInterface(iface)) {
-            throw new UnsupportedOperationException("The given iface is not currently tracked.");
-        }
-    }
-
     private boolean checkUseRestrictedNetworksPermission() {
         return PermissionUtils.checkAnyPermissionOf(mContext,
                 android.Manifest.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS);
@@ -83,7 +80,7 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         mStarted.set(true);
     }
 
-    private void logIfEthernetNotStarted() {
+    private void throwIfEthernetNotStarted() {
         if (!mStarted.get()) {
             throw new IllegalStateException("System isn't ready to change ethernet configurations");
         }
@@ -114,7 +111,7 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
      */
     @Override
     public void setConfiguration(String iface, IpConfiguration config) {
-        logIfEthernetNotStarted();
+        throwIfEthernetNotStarted();
 
         PermissionUtils.enforceNetworkStackPermission(mContext);
         if (mTracker.isRestrictedInterface(iface)) {
@@ -143,10 +140,8 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
      * Adds a listener.
      * @param listener A {@link IEthernetServiceListener} to add.
      */
-    public void addListener(IEthernetServiceListener listener) {
-        if (listener == null) {
-            throw new IllegalArgumentException("listener must not be null");
-        }
+    public void addListener(IEthernetServiceListener listener) throws RemoteException {
+        Objects.requireNonNull(listener, "listener must not be null");
         PermissionUtils.enforceAccessNetworkStatePermission(mContext, TAG);
         mTracker.addListener(listener, checkUseRestrictedNetworksPermission());
     }
@@ -208,47 +203,82 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
         pw.decreaseIndent();
     }
 
-    /**
-     * Validate the state of ethernet for APIs tied to network management.
-     *
-     * @param iface the ethernet interface name to operate on.
-     * @param methodName the name of the calling method.
-     */
-    private void validateNetworkManagementState(@NonNull final String iface,
-            final @NonNull String methodName) {
-        logIfEthernetNotStarted();
+    private void enforceNetworkManagementPermission() {
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.MANAGE_ETHERNET_NETWORKS,
+                "EthernetServiceImpl");
+    }
 
-        // TODO: add permission check here for MANAGE_INTERNAL_NETWORKS when it's available.
-        Objects.requireNonNull(iface, "Pass a non-null iface.");
-        Objects.requireNonNull(methodName, "Pass a non-null methodName.");
-        enforceAutomotiveDevice(methodName);
-        enforceInterfaceIsTracked(iface);
+    private void enforceManageTestNetworksPermission() {
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.MANAGE_TEST_NETWORKS,
+                "EthernetServiceImpl");
+    }
+
+    private void maybeValidateTestCapabilities(final String iface,
+            @Nullable final NetworkCapabilities nc) {
+        if (!mTracker.isValidTestInterface(iface)) {
+            return;
+        }
+        // For test interfaces, only null or capabilities that include TRANSPORT_TEST are
+        // allowed.
+        if (nc != null && !nc.hasTransport(TRANSPORT_TEST)) {
+            throw new IllegalArgumentException(
+                    "Updates to test interfaces must have NetworkCapabilities.TRANSPORT_TEST.");
+        }
+    }
+
+    private void enforceAdminPermission(final String iface, boolean enforceAutomotive,
+            final String logMessage) {
+        if (mTracker.isValidTestInterface(iface)) {
+            enforceManageTestNetworksPermission();
+        } else {
+            enforceNetworkManagementPermission();
+            if (enforceAutomotive) {
+                enforceAutomotiveDevice(logMessage);
+            }
+        }
     }
 
     @Override
     public void updateConfiguration(@NonNull final String iface,
-            @NonNull final InternalNetworkUpdateRequest request,
-            @Nullable final IInternalNetworkManagementListener listener) {
-        Log.i(TAG, "updateConfiguration called with: iface=" + iface
-                + ", request=" + request + ", listener=" + listener);
-        validateNetworkManagementState(iface, "updateConfiguration()");
+            @NonNull final EthernetNetworkUpdateRequest request,
+            @Nullable final INetworkInterfaceOutcomeReceiver listener) {
+        Objects.requireNonNull(iface);
+        Objects.requireNonNull(request);
+        throwIfEthernetNotStarted();
+
         // TODO: validate that iface is listed in overlay config_ethernet_interfaces
+        // only automotive devices are allowed to set the NetworkCapabilities using this API
+        enforceAdminPermission(iface, request.getNetworkCapabilities() != null,
+                "updateConfiguration() with non-null capabilities");
+        maybeValidateTestCapabilities(iface, request.getNetworkCapabilities());
 
         mTracker.updateConfiguration(
-                iface, request.getIpConfig(), request.getNetworkCapabilities(), listener);
+                iface, request.getIpConfiguration(), request.getNetworkCapabilities(), listener);
     }
 
     @Override
     public void connectNetwork(@NonNull final String iface,
-            @Nullable final IInternalNetworkManagementListener listener) {
+            @Nullable final INetworkInterfaceOutcomeReceiver listener) {
         Log.i(TAG, "connectNetwork called with: iface=" + iface + ", listener=" + listener);
-        validateNetworkManagementState(iface, "connectNetwork()");
+        Objects.requireNonNull(iface);
+        throwIfEthernetNotStarted();
+
+        enforceAdminPermission(iface, true, "connectNetwork()");
+
+        mTracker.connectNetwork(iface, listener);
     }
 
     @Override
     public void disconnectNetwork(@NonNull final String iface,
-            @Nullable final IInternalNetworkManagementListener listener) {
+            @Nullable final INetworkInterfaceOutcomeReceiver listener) {
         Log.i(TAG, "disconnectNetwork called with: iface=" + iface + ", listener=" + listener);
-        validateNetworkManagementState(iface, "disconnectNetwork()");
+        Objects.requireNonNull(iface);
+        throwIfEthernetNotStarted();
+
+        enforceAdminPermission(iface, true, "connectNetwork()");
+
+        mTracker.disconnectNetwork(iface, listener);
     }
 }
