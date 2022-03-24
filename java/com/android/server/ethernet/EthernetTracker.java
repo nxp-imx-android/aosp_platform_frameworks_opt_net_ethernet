@@ -16,6 +16,8 @@
 
 package com.android.server.ethernet;
 
+import static android.net.EthernetManager.ETHERNET_STATE_DISABLED;
+import static android.net.EthernetManager.ETHERNET_STATE_ENABLED;
 import static android.net.TestNetworkManager.TEST_TAP_PREFIX;
 
 import static com.android.internal.annotations.VisibleForTesting.Visibility.PACKAGE;
@@ -55,6 +57,7 @@ import com.android.net.module.util.PermissionUtils;
 import java.io.FileDescriptor;
 import java.net.InetAddress;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -88,7 +91,7 @@ public class EthernetTracker {
      * Interface names we track. This is a product-dependent regular expression, plus,
      * if setIncludeTestInterfaces is true, any test interfaces.
      */
-    private String mIfaceMatch;
+    private volatile String mIfaceMatch;
     /**
      * Track test interfaces if true, don't track otherwise.
      */
@@ -118,6 +121,8 @@ public class EthernetTracker {
     // Tracks whether clients were notified that the tethered interface is available
     private boolean mTetheredInterfaceWasAvailable = false;
     private volatile IpConfiguration mIpConfigForDefaultInterface;
+
+    private int mEthernetState = ETHERNET_STATE_ENABLED;
 
     private class TetheredInterfaceRequestList extends
             RemoteCallbackList<ITetheredInterfaceCallback> {
@@ -337,6 +342,22 @@ public class EthernetTracker {
         return mFactory.getAvailableInterfaces(includeRestricted);
     }
 
+    List<String> getInterfaceList() {
+        final List<String> interfaceList = new ArrayList<String>();
+        final String[] ifaces;
+        try {
+            ifaces = mNetd.interfaceGetList();
+        } catch (RemoteException e) {
+            Log.e(TAG, "Could not get list of interfaces " + e);
+            return interfaceList;
+        }
+        final String ifaceMatch = mIfaceMatch;
+        for (String iface : ifaces) {
+            if (iface.matches(ifaceMatch)) interfaceList.add(iface);
+        }
+        return interfaceList;
+    }
+
     /**
      * Returns true if given interface was configured as restricted (doesn't have
      * NET_CAPABILITY_NOT_RESTRICTED) capability. Otherwise, returns false.
@@ -355,6 +376,8 @@ public class EthernetTracker {
             for (String iface : getInterfaces(canUseRestrictedNetworks)) {
                 unicastInterfaceStateChange(listener, iface);
             }
+
+            unicastEthernetStateChange(listener, mEthernetState);
         });
     }
 
@@ -823,6 +846,53 @@ public class EthernetTracker {
         })) {
             cv.block(2000L);
         }
+    }
+
+    @VisibleForTesting(visibility = PACKAGE)
+    protected void setEthernetEnabled(boolean enabled) {
+        mHandler.post(() -> {
+            int newState = enabled ? ETHERNET_STATE_ENABLED : ETHERNET_STATE_DISABLED;
+            if (mEthernetState == newState) return;
+
+            mEthernetState = newState;
+
+            if (enabled) {
+                trackAvailableInterfaces();
+            } else {
+                // TODO: maybe also disable server mode interface as well.
+                untrackFactoryInterfaces();
+            }
+            broadcastEthernetStateChange(mEthernetState);
+        });
+    }
+
+    private void untrackFactoryInterfaces() {
+        for (String iface : mFactory.getAvailableInterfaces(true /* includeRestricted */)) {
+            stopTrackingInterface(iface);
+        }
+    }
+
+    private void unicastEthernetStateChange(@NonNull IEthernetServiceListener listener,
+            int state) {
+        ensureRunningOnEthernetServiceThread();
+        try {
+            listener.onEthernetStateChanged(state);
+        } catch (RemoteException e) {
+            // Do nothing here.
+        }
+    }
+
+    private void broadcastEthernetStateChange(int state) {
+        ensureRunningOnEthernetServiceThread();
+        final int n = mListeners.beginBroadcast();
+        for (int i = 0; i < n; i++) {
+            try {
+                mListeners.getBroadcastItem(i).onEthernetStateChanged(state);
+            } catch (RemoteException e) {
+                // Do nothing here.
+            }
+        }
+        mListeners.finishBroadcast();
     }
 
     void dump(FileDescriptor fd, IndentingPrintWriter pw, String[] args) {
